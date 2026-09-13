@@ -46,7 +46,12 @@ const SQL = fs.readFileSync(path.join(DIR, ARCHIVO_SEMILLA), 'utf8');
    ('Nombre', 'descripción', '[...]'::jsonb, orden) de dentro de `values`. */
 function rolesDeLaSemilla() {
   const ini = SQL.indexOf('returns table (nombre text');
-  const fin = SQL.indexOf('-- ── 2 ·');
+  /* El final es donde ACABA la función, no el segundo apartado de la
+     migración: la 0126 define la semilla en su apartado 5, y buscar «── 2 ·»
+     desde el principio del archivo daba una posición ANTERIOR al principio del
+     cuerpo — o sea, un trozo vacío y once roles convertidos en cero sin que
+     nada pareciera roto. */
+  const fin = SQL.indexOf('$$;', ini);
   const cuerpo = SQL.slice(ini, fin);
   const roles = [];
   const re = /\('([^']+)',\s*'([^']*)',\s*'(\[[\s\S]*?\])'::jsonb,\s*(\d+)\)/g;

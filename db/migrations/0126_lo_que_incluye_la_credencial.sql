@@ -201,6 +201,77 @@ create unique index if not exists derecho_consumo_unico_total
 -- en uno de grupo el puesto va nulo y el titular pasa a ser la boleta entera.
 -- Las dos formas caben en la misma regla.
 
+-- ── 5 · Quién puede repartir ───────────────────────────────────────────
+--
+-- `entregar` es un permiso nuevo del catálogo (`core/permisos/catalogo.js`), y
+-- va aparte de `checkin` a propósito: quien sirve la comida no tiene por qué
+-- poder abrir la puerta del evento, y quien está en la puerta no tiene por qué
+-- poder repartir el almuerzo. A menudo son dos empresas distintas.
+--
+-- La semilla se vuelve a escribir entera —es lo que hizo la 0124— porque un
+-- permiso nuevo en el catálogo no llega solo a la función que siembra los roles
+-- de un evento nuevo. Es la misma lista, con `entregar` añadido al
+-- Administrador, cuya promesa es «puede todo dentro del evento».
+
+create or replace function private.fn_roles_semilla()
+returns table (nombre text, descripcion text, permissions jsonb, orden integer)
+language sql
+immutable
+as $$
+  values
+    ('Administrador',     'Puede todo dentro del evento, salvo transferirlo o borrarlo',
+      '["editar_evento","publicar_evento","editar_pagina_publica","gestionar_imagenes",
+        "gestionar_agenda","gestionar_torneo","gestionar_expositores","gestionar_accesos",
+        "invitar_staff","gestionar_roles","remover_miembros","gestionar_solicitudes",
+        "gestionar_tareas","ver_documentos","gestionar_documentos","gestionar_vacantes",
+        "gestionar_tickets","gestionar_descuentos",
+        "ver_clientes","gestionar_clientes","checkin","entregar","vip_zone","borrar_boletas",
+        "gestionar_acreditacion","gestionar_padron",
+        "crear_canales","borrar_mensajes","publicar_anuncios",
+        "ver_pagos","reembolsar","ver_analytics"]'::jsonb, 0),
+    ('Editor',            'Edita información, agenda y página pública',
+      '["editar_evento","editar_pagina_publica","gestionar_imagenes","gestionar_agenda","ver_documentos"]'::jsonb, 1),
+    ('Coordinador',       'Coordina al staff y al evento completo',
+      '["editar_evento","invitar_staff","gestionar_agenda","ver_clientes","ver_analytics",
+        "crear_canales","gestionar_solicitudes","gestionar_tareas","ver_documentos"]'::jsonb, 2),
+    ('Puerta',            'Controla el ingreso y escanea las entradas',
+      '["checkin","ver_clientes"]'::jsonb, 3),
+    -- Montaje y escenario. Se le añaden los dos que necesita de verdad y que
+    -- antes obligaban a darle el evento entero: colgar los planos y el rider, y
+    -- dejar listas las escarapelas del día.
+    ('Staff · Logística', 'Montaje, técnica y escenario',
+      '["crear_canales","checkin","ver_documentos","gestionar_documentos",
+        "gestionar_acreditacion","gestionar_accesos"]'::jsonb, 4),
+    ('Atención',          'Atiende asistentes durante el evento',
+      '["ver_clientes","gestionar_clientes","checkin","gestionar_solicitudes","gestionar_padron"]'::jsonb, 5),
+    ('VIP host',          'Anfitrión de zona VIP',
+      '["vip_zone","ver_clientes","checkin"]'::jsonb, 6),
+    ('Coordinación de expositores', 'Gestiona los stands y las fichas de los expositores',
+      '["gestionar_expositores","ver_clientes"]'::jsonb, 7),
+    ('Programación',      'Arma el calendario: charlas, talleres y competencias',
+      '["gestionar_agenda","gestionar_torneo"]'::jsonb, 8),
+    ('Finanzas',          'Ve ingresos, facturación y reembolsos',
+      '["ver_pagos","reembolsar","ver_clientes","ver_analytics"]'::jsonb, 9),
+    ('Moderación',        'Modera el chat del evento',
+      '["borrar_mensajes","crear_canales"]'::jsonb, 10)
+$$;
+
+-- Y a los eventos que ya existen, sólo a quien YA podía por `editar_evento`:
+-- no se le da a nadie un poder que no tuviera. Se AÑADE, nunca se reemplaza, y
+-- se puede correr dos veces.
+--
+-- A quien reparte de verdad —Puerta, Atención, Staff · Logística— se lo asigna
+-- quien organiza, a mano. Dárselo aquí sería decidir por ellos quién toca la
+-- comida, y es justo la decisión que esta migración existe para dejarles.
+
+update public.event_roles r
+   set permissions = coalesce(
+         (select jsonb_agg(distinct p)
+            from jsonb_array_elements_text(r.permissions || '["entregar"]'::jsonb) p),
+         r.permissions)
+ where r.permissions ? 'editar_evento'
+   and not (r.permissions ? 'entregar');
+
 -- ── Comprobación ───────────────────────────────────────────────────────
 --
 --   select tablename from pg_tables where schemaname='public'
@@ -208,6 +279,11 @@ create unique index if not exists derecho_consumo_unico_total
 --
 --   select indexname from pg_indexes where schemaname='public'
 --    and tablename='derecho_consumos';
+--
+--   -- Y que el permiso nuevo llegó a quien ya administraba:
+--   select count(*) from public.event_roles
+--    where permissions ? 'editar_evento' and not (permissions ? 'entregar');
+--   -- tiene que salir 0.
 --   -- tienen que estar los dos 'derecho_consumo_unico_*'
 --
 --   -- Y que la regla es de verdad. Con un derecho y una ventana creados:

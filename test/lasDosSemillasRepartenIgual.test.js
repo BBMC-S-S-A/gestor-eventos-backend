@@ -42,14 +42,27 @@ const { ROLES, CANALES, BLOQUES_INICIALES, paginaPorDefecto } = require('../modu
 const { TODOS } = require('../core/permisos/catalogo.js');
 
 const RAIZ = path.resolve(__dirname, '..');
-const MIGRACION = '0124_permisos_finos_en_vez_de_la_llave_maestra.sql';
+
+/* La migración que DEFINE la semilla es la última que la escribe, no una
+   escrita a mano aquí. Con el nombre fijo, la prueba comparaba contra la 0124
+   mientras la base sembraba lo que dijera la 0126 — que es exactamente el fallo
+   que este archivo existe para cazar, cometido por el archivo mismo.
+
+   Se busca igual que en `rolesSemilla.test.js`: sólo migraciones numeradas, y
+   gana la última que contenga la definición. */
+const MIGRACION = fs.readdirSync(path.join(RAIZ, 'db', 'migrations'))
+  .filter(f => /^\d{4}_.*\.sql$/.test(f))
+  .filter(f => fs.readFileSync(path.join(RAIZ, 'db', 'migrations', f), 'utf8')
+    .includes('create or replace function private.fn_roles_semilla()'))
+  .sort()
+  .pop();
 
 /* La lista de la base, sacada de la migración que la define. Se lee del
    fichero y no de la base: un test no puede necesitar credenciales para
    contestar una pregunta que está escrita en el repo. */
 function semillaDeLaBase() {
   const sql = fs.readFileSync(path.join(RAIZ, 'db', 'migrations', MIGRACION), 'utf8');
-  const i = sql.indexOf('values');
+  const i = sql.indexOf('create or replace function private.fn_roles_semilla()');
   const bloque = sql.slice(i, sql.indexOf('$$;', i));
   const roles = {};
   for (const m of bloque.matchAll(/\('([^']+)',\s*'[^']*',\s*'(\[[\s\S]*?\])'::jsonb/g)) {
