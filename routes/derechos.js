@@ -29,6 +29,7 @@ const { assertPermiso } = require('../lib/acceso.js');
 const { verifyTicketQR } = require('../lib/qr.js');
 const { horaDelEscaneo } = require('../lib/horaDeEscaneo.js');
 const D = require('../lib/derechos.js');
+const credenciales = require('../lib/credenciales.js');
 
 const router = express.Router();
 router.use(verifySupabaseJWT);
@@ -248,7 +249,7 @@ async function resolverTitular({ eventoId, qr_token, codigo, puesto_id }) {
     const r = verifyTicketQR(qr_token);
     if (!r.ok) throw Object.assign(new Error('QR inválido.'), { http: 400, sound: 'error' });
     if (r.evento_id !== eventoId) throw Object.assign(new Error('Este QR es de otro evento.'), { http: 400, sound: 'error' });
-    return { ticketId: r.ticket_id, puestoId: r.puesto_id || null, token: qr_token, origen: 'qr' };
+    return { ticketId: r.ticket_id, puestoId: r.puesto_id || null, token: qr_token, gen: r.gen || 0, origen: 'qr' };
   }
   if (puesto_id) {
     const { data: p } = await supabase
@@ -323,12 +324,19 @@ router.post('/:eventoId/consumo', sesion('Lo opera quien reparte: la ruta compru
     let persona = null;
     if (quien.puestoId) {
       const { data: p } = await supabase
-        .from('ticket_puestos').select('id, ticket_id, orden, nombre, email, documento, qr_token')
+        .from('ticket_puestos').select('id, ticket_id, orden, nombre, email, documento, qr_token, credencial_gen')
         .eq('id', quien.puestoId).maybeSingle();
       if (!p || p.ticket_id !== ticket.id) {
         return res.status(404).json({ error: 'Esa persona no está en esta boleta.', sound: 'error' });
       }
-      if (quien.token && p.qr_token && p.qr_token !== quien.token) {
+      /* No se compara el token con el guardado: eso mata también el QR de un
+         reenvío legítimo —el correo se pierde y se manda otra vez, y cada
+         envío firma un token nuevo del mismo puesto—. Lo que invalida es la
+         generación, que sube sólo al transferir (0127). */
+      /* Sólo cuando hay QR: la entrega a mano (buscando por nombre) no
+         presenta credencial ninguna, y medirle la generación la rechazaría
+         siempre en un puesto ya transferido — a la persona correcta. */
+      if (quien.token && !credenciales.credencialAlDia({ genDelToken: quien.gen, puesto: p })) {
         return res.status(409).json({ error: 'Credencial vencida: este puesto se transfirió.', sound: 'error' });
       }
       persona = p;
