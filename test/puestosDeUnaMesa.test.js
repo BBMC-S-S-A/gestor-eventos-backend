@@ -230,3 +230,94 @@ test('emitirPuestos nunca hace fracasar una venta ya cobrada', () => {
   assert.match(texto, /catch/);
   assert.equal(/throw /.test(texto.slice(texto.indexOf('async function emitirPuestos'))), false);
 });
+
+/* ── Que el QR del puesto valga sólo mientras sea el suyo ───────────── */
+
+/* `verifyTicketQR` dice que la firma es nuestra y no está tocada. No puede
+   decir más: es criptografía, no memoria. Y como los QR no caducan, un token
+   viejo pasa esa comprobación para siempre. Para un puesto eso no basta,
+   porque su credencial ROTA al transferirlo — y lo único que distingue al
+   viejo del nuevo es que ya no es el que guarda la base. */
+test('el veredicto del puesto compara contra lo que guarda la base', () => {
+  const puesto = { id: 'p1', ticket_id: 't1', qr_token: 'EL-BUENO', estado: 'asignado' };
+
+  assert.equal(p.veredictoDePuesto({ puesto, token: 'EL-BUENO' }).ok, true);
+
+  /* El del que vendió su puesto: firma válida, pero ya no es el vigente. */
+  const rotado = p.veredictoDePuesto({ puesto, token: 'EL-VIEJO' });
+  assert.equal(rotado.ok, false);
+  assert.equal(rotado.motivo, 'rotado');
+
+  /* A medio transferir: sin credencial, no abre. */
+  assert.equal(p.veredictoDePuesto({ puesto: { ...puesto, qr_token: null }, token: 'x' }).motivo, 'sin_token');
+  /* Ya entró. */
+  assert.equal(p.veredictoDePuesto({ puesto: { ...puesto, estado: 'usado' }, token: 'EL-BUENO' }).motivo, 'usado');
+  /* Borrado. */
+  assert.equal(p.veredictoDePuesto({ puesto: null, token: 'EL-BUENO' }).motivo, 'no_existe');
+  /* De otra boleta: el token dice una cosa y la fila otra. */
+  assert.equal(p.veredictoDePuesto({ puesto, token: 'EL-BUENO', ticketId: 't2' }).motivo, 'otra_boleta');
+});
+
+test('todos los motivos de puerta cerrada tienen algo que decirle a quien está en la fila', () => {
+  for (const [motivo, texto] of Object.entries(p.PUERTA_CERRADA)) {
+    assert.ok(texto && texto.length > 10, `«${motivo}» no explica nada`);
+  }
+});
+
+/* ── Y que la puerta lo use de verdad ─────────────────────────────────── */
+
+/* La 0118 firmaba el `pid` dentro del QR y NADIE lo leía: el escáner sacaba el
+   `tid` y marcaba la boleta entera. Esta prueba es la que impide que el cable
+   se vuelva a soltar — que es como estuvo desde que se escribió. */
+test('el check-in lee el puesto del QR y consume UN puesto', () => {
+  const ruta = leer('routes/clientes.js');
+  assert.match(ruta, /puestoIdDelQr\s*=\s*r\.puesto_id/,
+    'el check-in vuelve a tirar el `pid` del QR a la basura');
+  assert.match(ruta, /puertaDePuestos\.consumirPuesto\(/,
+    'el check-in no consume el puesto: marca la boleta entera otra vez');
+  /* Y que el rechazo por «ya usada» no se dispare antes de mirar los puestos:
+     en una mesa, ese estado no significa que no quede sitio. */
+  const iUsada = ruta.indexOf("ticket.estado === 'usado'");
+  const iPuestos = ruta.indexOf('puertaDePuestos.puestosDe(');
+  assert.ok(iPuestos > 0 && iPuestos < iUsada,
+    'se rechaza por «boleta usada» antes de contar los puestos: eso deja fuera al resto de la mesa');
+});
+
+test('los cinco escáneres rechazan un QR de puesto rotado', () => {
+  /* Puntos de stand, canje, portal del expositor y sesiones pasan todos por
+     `resolverTicket`. Si la comprobación viviera sólo en el check-in, el que
+     vendió su puesto seguiría sumando puntos y canjeando con el QR viejo. */
+  const lookup = leer('lib/ticketLookup.js');
+  assert.match(lookup, /r\.puesto_id/, 'resolverTicket ignora el puesto del QR');
+  assert.match(lookup, /se transfirió/, 'resolverTicket no rechaza un token rotado');
+});
+
+/* ── Y que el reingreso lleve el vaivén por persona ───────────────────── */
+
+/* Alternar según el último movimiento de la BOLETA es correcto con una persona
+   por boleta, y sólo con eso. Con cuatro compartiéndola, el escáner alternaba
+   entre ellas y el aforo acababa diciendo que no había nadie mientras entraban
+   cuatro. Ningún error a la vista: el peor modo de fallo para el número que
+   decide si se cierra una puerta. */
+test('el reingreso pregunta por el puesto antes de alternar', () => {
+  const ruta = leer('routes/clientes.js');
+  const reingreso = ruta.slice(ruta.indexOf("router.post('/:eventoId/reingreso'"));
+
+  assert.match(reingreso, /vaivenDePuesto\(/,
+    'el reingreso volvió a alternar por boleta: en una mesa eso cuenta entradas como salidas');
+  assert.match(reingreso, /puesto_id/,
+    'el movimiento no dice de quién es, así que el vaivén vuelve a ser de la mesa entera');
+  /* La alternancia vieja sigue ahí para las boletas de una persona, que es
+     donde es correcta — no se ha sustituido, se ha acotado. */
+  assert.match(reingreso, /dentroAhora/,
+    'se perdió el vaivén de siempre para las boletas de una persona');
+});
+
+test('la 0125 existe y añade el puesto al movimiento', () => {
+  const sql = leer('db/migrations/0125_el_vaiven_es_de_cada_persona.sql');
+  assert.match(sql, /alter table public\.ticket_movimientos/);
+  assert.match(sql, /add column if not exists puesto_id/);
+  /* Sin índice, cada escaneo recorrería todos los movimientos del evento —
+     decenas de miles en un evento grande, y creciendo toda la noche. */
+  assert.match(sql, /create index if not exists ticket_movimientos_puesto_idx/);
+});
