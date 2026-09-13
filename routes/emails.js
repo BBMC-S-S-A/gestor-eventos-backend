@@ -259,7 +259,9 @@ router.post('/eventos/:id/emails/previsualizar', exige(PERMS_EDITAR), async (req
       tarea      : 'Confirmar catering',
     });
 
-    const { asunto, html } = renderEmail({ tipo, plantilla, evento, ctx });
+    /* `qrEnLinea`: esto se pinta en el navegador del panel, no se manda. Un
+       `cid:` ahí sería una imagen rota — ver `bloqueDatos`. */
+    const { asunto, html } = renderEmail({ tipo, plantilla, evento, ctx, qrEnLinea: true });
     res.json({ asunto, html, ctx });
   } catch (e) { fallo(res, e); }
 });

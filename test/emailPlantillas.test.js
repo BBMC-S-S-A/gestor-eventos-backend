@@ -175,11 +175,49 @@ test('el botón elige su color de texto contra el primario, no contra el fondo',
 
 test('la boleta lleva QR y código; los demás tipos no llevan QR', () => {
   const conQr = renderEmail({ tipo: 'ticket', plantilla: {}, evento: EVENTO, ctx: CTX });
-  assert.ok(conQr.html.includes('create-qr-code'), 'la boleta salió sin QR');
+  assert.ok(conQr.html.includes('src="cid:'), 'la boleta salió sin QR');
+  assert.equal(conQr.adjuntos.length, 1, 'el QR tiene que viajar adjunto al mensaje');
   assert.ok(conQr.html.includes('GTK-4F8B2A'), 'la boleta salió sin código');
 
   const sinQr = renderEmail({ tipo: 'invitacion_equipo', plantilla: {}, evento: EVENTO, ctx: { nombre: 'Ana', rol: 'Editor' } });
-  assert.ok(!sinQr.html.includes('create-qr-code'), 'la invitación al equipo no debería llevar QR');
+  assert.ok(!sinQr.html.includes('src="cid:'), 'la invitación al equipo no debería llevar QR');
+  assert.equal(sinQr.adjuntos.length, 0, 'sin QR no hay nada que adjuntar');
+});
+
+/* El QR se pedía a `api.qrserver.com` con el token dentro de la URL: la
+   credencial que abre la puerta del evento, en los logs de acceso de un
+   tercero. El resto del backend ya evita justo eso (los escaneos son POST para
+   no escribirla ni en los logs propios), así que esta prueba es la que impide
+   que vuelva a colarse un `<img src="…?data=EL_TOKEN">`. */
+test('el QR de la boleta no sale del servidor: ni servicio externo, ni token en ninguna URL', () => {
+  const TOKEN = 'eyJhbGciOiJIUzI1NiJ9.eyJ0aWQiOiJ0LTEiLCJlaWQiOiJlLTEifQ.firma-de-mentira';
+  const { html, adjuntos } = renderEmail({
+    tipo: 'ticket', plantilla: {}, evento: EVENTO,
+    ctx: { ...CTX, qr_token: TOKEN },
+  });
+
+  assert.equal(/qrserver|chart\.googleapis|create-qr-code/.test(html), false,
+    'el QR volvió a pedirse a un servicio de terceros');
+  assert.equal(html.includes(TOKEN), false,
+    'el token de la boleta acabó escrito en el HTML del correo');
+  /* Y sí está, pero dentro del mensaje: un PNG de verdad. */
+  assert.equal(adjuntos.length, 1);
+  assert.equal(adjuntos[0].contentType, 'image/png');
+  assert.equal(adjuntos[0].contentDisposition, 'inline');
+  assert.ok(Buffer.isBuffer(adjuntos[0].content));
+  assert.equal(adjuntos[0].content.subarray(1, 4).toString(), 'PNG', 'el adjunto no es un PNG');
+  assert.ok(html.includes(`src="cid:${adjuntos[0].cid}"`), 'el HTML no apunta al adjunto');
+});
+
+/* La vista previa del panel se pinta en un navegador, donde un `cid:` es una
+   imagen rota — y `data:` no sirve para el correo porque Gmail lo bloquea. */
+test('la vista previa mete el PNG en línea en vez de un cid', () => {
+  const { html, adjuntos } = renderEmail({
+    tipo: 'ticket', plantilla: {}, evento: EVENTO, ctx: CTX, qrEnLinea: true,
+  });
+  assert.ok(html.includes('src="data:image/png;base64,'), 'la vista previa no pinta el QR');
+  assert.equal(html.includes('src="cid:'), false);
+  assert.equal(adjuntos.length, 0, 'la vista previa no manda nada, no hay qué adjuntar');
 });
 
 test('un campo vacío en la plantilla cae al texto por defecto de su tipo', () => {

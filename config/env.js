@@ -22,8 +22,19 @@ for (const key of REQUIRED_IN_PRODUCTION) {
   }
 }
 
-if (!process.env.QR_JWT_SECRET) {
-  console.warn('[WARN]  QR_JWT_SECRET no configurado. Los QR de tickets usarán un secreto débil de dev.');
+/* El secreto de los QR no basta con que ESTÉ: el valor de ejemplo del
+   `.env.example` copiado tal cual es tan público como no tener ninguno, y con
+   él se pueden fabricar entradas válidas para cualquier evento. Quien decide
+   si sirve es `lib/qr.js`, que es quien firma; aquí sólo se para el arranque.
+
+   En producción esto es fatal y se corta el despliegue. Fuera de producción se
+   avisa y se sigue: `lib/qr.js` firma con un secreto aleatorio del proceso. */
+const qrSecreto = require('../lib/qr.js').revisarSecreto();
+if (!qrSecreto.ok) {
+  console.error(`\n[FATAL] ${qrSecreto.motivo}\n`);
+  process.exit(1);
+} else if (!process.env.QR_JWT_SECRET) {
+  console.warn('[WARN]  QR_JWT_SECRET no configurado: los QR se firman con un secreto de un solo uso (ver lib/qr.js).');
 }
 
 module.exports = {
