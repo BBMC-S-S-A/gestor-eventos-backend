@@ -10,6 +10,7 @@ const { otorgarPuntos, otorgarBadge, reglasPuntosDeEvento } = require('../lib/ga
 const { dispatch } = require('../lib/webhooks.js');
 const { assertPermiso } = require('../lib/acceso.js');
 const { resolverTicket } = require('../lib/ticketLookup.js');
+const puertaDePuestos = require('../lib/puertaDePuestos.js');
 const { notificar } = require('../lib/notificar.js');
 const { correrAutomatizaciones } = require('../lib/automatizaciones.js');
 const { ofrecerCupoAlSiguiente } = require('../lib/waitlistOferta.js');
@@ -935,10 +936,14 @@ router.post('/:eventoId/checkin', sesion('Lo opera quien está en la puerta: la 
 
     /* Resolver el ticket: por qr_token (verificar firma) o por código corto */
     let ticketQuery;
+    /* El puesto que venga dentro del QR («puesto 2 de 4»). `null` en un QR de
+       boleta normal, que es la inmensa mayoría. */
+    let puestoIdDelQr = null;
     if (qr_token) {
       const r = verifyTicketQR(qr_token);
       if (!r.ok) return res.status(400).json({ error: 'QR inválido.', detalle: r.error });
       if (r.evento_id !== eventoId) return res.status(400).json({ error: 'Este QR es de otro evento.' });
+      puestoIdDelQr = r.puesto_id || null;
       ticketQuery = supabase.from('tickets').select(`*, tipo:ticket_types!ticket_type_id(nombre)`).eq('id', r.ticket_id).maybeSingle();
     } else {
       ticketQuery = supabase.from('tickets').select(`*, tipo:ticket_types!ticket_type_id(nombre)`).eq('codigo', codigo.toUpperCase().trim()).eq('evento_id', eventoId).maybeSingle();
@@ -953,7 +958,15 @@ router.post('/:eventoId/checkin', sesion('Lo opera quien está en la puerta: la 
     if (ticket.estado === 'invalido' || ticket.estado === 'reembolsado') {
       return res.status(400).json({ error: `Boleta ${ticket.estado}.`, ticket, sound: 'error' });
     }
-    if (ticket.estado === 'usado') {
+
+    /* ¿Esta boleta lleva varios puestos? Se mira ANTES de rechazar por «ya
+       usada», porque en una mesa ese estado no significa lo mismo: una mesa de
+       cuatro con una persona dentro sigue teniendo tres entradas buenas, y
+       rechazarla aquí es lo que dejaba al resto en la calle. Quien decide es
+       el recuento de puestos, no el estado de la boleta. */
+    const losPuestos = await puertaDePuestos.puestosDe(ticket.id);
+
+    if (losPuestos.length <= 1 && ticket.estado === 'usado') {
       return res.status(409).json({
         error: 'Esta boleta ya fue usada.',
         ticket,
@@ -971,6 +984,51 @@ router.post('/:eventoId/checkin', sesion('Lo opera quien está en la puerta: la 
     if (puerta && Array.isArray(puerta.tipos) && puerta.tipos.length
         && !puerta.tipos.includes(ticket.ticket_type_id)) {
       advertencia = `Esta boleta (${ticket.tipo?.nombre || 'sin tipo'}) no corresponde a ${puerta.nombre}.`;
+    }
+
+    /* ── La mesa ──────────────────────────────────────────────────────────
+     *
+     * Con varios puestos, lo que se consume es UN puesto y no la boleta. Dos
+     * cosas pasan aquí que antes no pasaban:
+     *
+     *   · el QR de un puesto se compara con el que guarda la base, así que un
+     *     token rotado por una transferencia deja de abrir de verdad;
+     *   · la boleta sólo se marca usada cuando entra el último.
+     *
+     * Mientras quede sitio se responde desde aquí. Cuando se agota, se sigue
+     * por el camino de siempre —abajo—, que marca la boleta y reparte puntos:
+     * así una mesa cuenta una asistencia y no cuatro. */
+    if (losPuestos.length > 1) {
+      const paso = await puertaDePuestos.consumirPuesto({
+        ticket, puestoIdDelQr, token: qr_token || null, at: checkinAt,
+        puestos: losPuestos,
+      });
+
+      if (paso.aplica && !paso.ok) {
+        /* `usado` y `completa` son «ya entró», que en la puerta se contesta con
+           409 como la boleta repetida; lo demás es una credencial que no vale. */
+        const repetida = paso.motivo === 'usado' || paso.motivo === 'completa';
+        return res.status(repetida ? 409 : 400).json({
+          error: paso.mensaje || 'Este QR no abre la puerta.',
+          ticket, sound: 'error',
+          ya_usada: repetida || undefined,
+          motivo: paso.motivo,
+          puestos: paso.estado,
+        });
+      }
+
+      if (paso.aplica && paso.ok && !paso.agotado) {
+        /* Entró uno y la mesa sigue teniendo sitio. */
+        return res.json({
+          ok: true,
+          ticket,
+          puesto: paso.puesto,
+          puestos: paso.estado,
+          advertencia,
+          sound: 'ok',
+        });
+      }
+      /* `agotado`: entró el último, así que cae al camino normal de abajo. */
     }
 
     /* La marca de «usada» es la CERRADURA, no el `if` de arriba.
