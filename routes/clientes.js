@@ -1131,8 +1131,13 @@ router.post('/:eventoId/reingreso', sesion('Lo opera quien está en la puerta: l
   const { qr_token, codigo, tipo, acceso_id, zona_id } = req.body || {};
   try {
     const ev = await assertCheckinAccess(eventoId, req.user.id);
+    /* `resolverTicket` ya rechaza un QR de puesto rotado por una transferencia
+       (`lib/ticketLookup.js`), así que aquí sólo hace falta saber DE QUIÉN es
+       el QR para llevarle su propio ir y venir. */
     const ticket = await resolverTicket(eventoId, { qr_token, codigo });
     if (!ticket) return res.status(404).json({ error: 'Boleta no encontrada.' });
+
+    const puestoIdDelReingreso = qr_token ? (verifyTicketQR(qr_token).puesto_id || null) : null;
 
     let accesoNombre = null, zona = null;
     if (acceso_id || zona_id) {
@@ -1156,19 +1161,62 @@ router.post('/:eventoId/reingreso', sesion('Lo opera quien está en la puerta: l
       ).order('created_at', { ascending: false }).limit(1).maybeSingle();
       return data || null;
     };
-    const ult = zona
-      ? [
-          await ultimoDe(q => q.eq('zona_id', zona.id)),
-          await ultimoDe(q => q.is('zona_id', null).eq('zona', zonaNombre)),
-        ].filter(Boolean).sort((a, b) => b.created_at.localeCompare(a.created_at))[0] || null
-      : await ultimoDe(q => q.is('zona', null).is('zona_id', null));
-    const dentroAhora = ult?.tipo ? ult.tipo === 'entrada' : (zona ? false : ticket.estado === 'usado');
-    const nuevo = (tipo === 'entrada' || tipo === 'salida') ? tipo : (dentroAhora ? 'salida' : 'entrada');
+    /* ── Una mesa va y viene por personas, no por boleta ──────────────────
+     *
+     * Alternar según el último movimiento de la BOLETA es correcto con una
+     * persona por boleta, y sólo con eso. Con cuatro compartiéndola, el
+     * escáner alternaba ENTRE ELLOS: entraba la 1, «salía» la 2, entraba la 3,
+     * «salía» la 4 — y el aforo de la zona acababa diciendo que no había nadie
+     * mientras entraban cuatro. Ningún error a la vista: un número tranquilo y
+     * equivocado en el tablero que decide si se cierra una puerta.
+     *
+     * Con puestos, cada persona lleva el suyo (`puesto_id`, 0125). */
+    const puestosDeLaBoleta = await puertaDePuestos.puestosDe(ticket.id);
+    const enMesa = await puertaDePuestos.vaivenDePuesto({
+      ticket, puestoIdDelQr: puestoIdDelReingreso, tipoPedido: tipo, zona,
+      puestos: puestosDeLaBoleta,
+    });
 
-    const { data: mov, error } = await supabase.from('ticket_movimientos').insert({
+    if (enMesa.aplica && !enMesa.ok) {
+      return res.status(409).json({ error: enMesa.mensaje, motivo: enMesa.motivo });
+    }
+
+    let nuevo;
+    if (enMesa.aplica) {
+      nuevo = enMesa.tipo;
+    } else {
+      const ult = zona
+        ? [
+            await ultimoDe(q => q.eq('zona_id', zona.id)),
+            await ultimoDe(q => q.is('zona_id', null).eq('zona', zonaNombre)),
+          ].filter(Boolean).sort((a, b) => b.created_at.localeCompare(a.created_at))[0] || null
+        : await ultimoDe(q => q.is('zona', null).is('zona_id', null));
+      const dentroAhora = ult?.tipo ? ult.tipo === 'entrada' : (zona ? false : ticket.estado === 'usado');
+      nuevo = (tipo === 'entrada' || tipo === 'salida') ? tipo : (dentroAhora ? 'salida' : 'entrada');
+    }
+
+    const filaDelMovimiento = {
       ticket_id: ticket.id, evento_id: eventoId, tipo: nuevo, cantidad: 1, origen: 'qr',
       acceso: accesoNombre, zona: zonaNombre, zona_id: zona?.id || null, operador_id: req.user.id,
-    }).select('id, tipo, acceso, zona, created_at').single();
+    };
+    /* De quién es este ir y venir. La clave se añade SÓLO en una mesa: en una
+       boleta de una persona la fila se escribe exactamente igual que antes de
+       la 0125, y así un despliegue sin la migración aplicada no pierde ni un
+       reingreso de los normales —que son casi todos—. */
+    if (enMesa.aplica) filaDelMovimiento.puesto_id = enMesa.puesto.id;
+
+    let { data: mov, error } = await supabase.from('ticket_movimientos')
+      .insert(filaDelMovimiento).select('id, tipo, acceso, zona, created_at').single();
+
+    /* Y si la 0125 todavía no está, se anota sin decir de quién es antes que
+       perder el movimiento: el aforo cuenta de menos, pero la persona queda
+       registrada y la puerta sigue funcionando. Perderlo sería peor. */
+    if (error && enMesa.aplica && /puesto_id/.test(error.message || '')) {
+      console.warn('[reingreso] sin la 0125 aplicada: el movimiento se anota sin puesto.');
+      delete filaDelMovimiento.puesto_id;
+      ({ data: mov, error } = await supabase.from('ticket_movimientos')
+        .insert(filaDelMovimiento).select('id, tipo, acceso, zona, created_at').single());
+    }
     if (error) return res.status(500).json({ error: error.message });
 
     /* Estado de la zona DESPUÉS del movimiento — es lo que el escáner pinta.
@@ -1182,6 +1230,18 @@ router.post('/:eventoId/reingreso', sesion('Lo opera quien está en la puerta: l
     res.status(201).json({
       ok: true, movimiento: mov, dentro: nuevo === 'entrada', zona: zonaNombre, aforo: estadoZona,
       ticket: { codigo: ticket.codigo, nombre: ticket.guest_nombre || 'Asistente', tipo: ticket.tipo?.nombre || 'General' },
+      /* En una mesa, quién se movió y cuántos de los suyos quedan dentro: sin
+         esto, el escáner enseña el nombre del titular las cuatro veces y quien
+         está en la puerta no puede saber si se contó a la persona correcta. */
+      ...(enMesa.aplica ? {
+        puesto: {
+          id: enMesa.puesto.id,
+          orden: enMesa.puesto.orden,
+          nombre: enMesa.puesto.nombre || null,
+          de: puestosDeLaBoleta.length,
+        },
+        dentro_de_la_boleta: enMesa.dentro + (nuevo === 'entrada' ? 1 : -1),
+      } : {}),
     });
   } catch (e) {
     res.status(e.message === 'No autorizado.' ? 403 : 400).json({ error: e.message });

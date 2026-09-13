@@ -41,6 +41,7 @@ function baseSimulada(tablas = {}) {
     if (tipo === 'eq') return fila[col] === val;
     if (tipo === 'neq') return fila[col] !== val;
     if (tipo === 'is') return fila[col] === val;
+    if (tipo === 'in') return val.includes(fila[col]);
     return true;
   });
 
@@ -74,6 +75,7 @@ function baseSimulada(tablas = {}) {
       eq(col, val) { filtros.push(['eq', col, val]); return api; },
       neq(col, val) { filtros.push(['neq', col, val]); return api; },
       is(col, val) { filtros.push(['is', col, val]); return api; },
+      in(col, val) { filtros.push(['in', col, val]); return api; },
       order(col) { orden = col; return api; },
       maybeSingle() {
         const r = ejecutar();
@@ -287,4 +289,150 @@ test('marcar un puesto compara el token DENTRO del update, no antes', async () =
   const tipos = escritura.filtros.map(f => `${f[0]}:${f[1]}`);
   assert.ok(tipos.includes('eq:qr_token'), 'el update no compara el token');
   assert.ok(tipos.includes('neq:estado'), 'el update no lleva la cerradura del doble escaneo');
+});
+
+/* ── El ir y venir: que el aforo cuente personas, no boletas ──────────── */
+
+/* El reingreso sin `tipo` alterna según el último movimiento de la BOLETA.
+ * Con cuatro personas compartiéndola, alternaba ENTRE ELLAS: entraba la 1,
+ * «salía» la 2, entraba la 3, «salía» la 4. Cuatro personas entrando y el
+ * aforo diciendo que no hay nadie — sin ningún error a la vista, que es el
+ * peor modo de fallo para el número que decide si se cierra una puerta. */
+
+const mesaConMovimientos = () => ({
+  ...mesaDeCuatro(),
+  ticket_movimientos: [],
+});
+
+test('cuatro escaneos de reingreso son cuatro ENTRADAS, no un vaivén', async () => {
+  const sim = baseSimulada(mesaConMovimientos());
+  const puerta = cargarPuerta(sim);
+  const lista = sim.datos.ticket_puestos;
+
+  const sentidos = [];
+  for (const n of [1, 2, 3, 4]) {
+    const v = await puerta.vaivenDePuesto({
+      ticket: TICKET, puestoIdDelQr: `p${n}`, tipoPedido: null, puestos: lista,
+    });
+    sentidos.push(v.tipo);
+    /* Se anota el movimiento, como haría la ruta. */
+    sim.datos.ticket_movimientos.push({
+      ticket_id: 't1', puesto_id: v.puesto.id, tipo: v.tipo,
+      created_at: `2026-09-13T20:0${n}:00Z`, zona: null, zona_id: null,
+    });
+  }
+
+  assert.deepEqual(sentidos, ['entrada', 'entrada', 'entrada', 'entrada'],
+    'el escáner volvió a alternar entre las personas de la misma mesa');
+});
+
+test('cada persona de la mesa va y viene por su cuenta', async () => {
+  const sim = baseSimulada(mesaConMovimientos());
+  const puerta = cargarPuerta(sim);
+  const lista = sim.datos.ticket_puestos;
+  const anotar = (v) => sim.datos.ticket_movimientos.push({
+    ticket_id: 't1', puesto_id: v.puesto.id, tipo: v.tipo,
+    created_at: `2026-09-13T2${sim.datos.ticket_movimientos.length}:00:00Z`,
+    zona: null, zona_id: null,
+  });
+
+  /* Entran la 1 y la 2. */
+  for (const n of [1, 2]) {
+    anotar(await puerta.vaivenDePuesto({ ticket: TICKET, puestoIdDelQr: `p${n}`, puestos: lista }));
+  }
+  /* La 1 sale a fumar: es SU segundo escaneo, así que es una salida. */
+  const sale = await puerta.vaivenDePuesto({ ticket: TICKET, puestoIdDelQr: 'p1', puestos: lista });
+  assert.equal(sale.tipo, 'salida');
+  anotar(sale);
+
+  /* Y la 2 sigue dentro: su estado no se movió porque salió otra persona. */
+  const dosSale = await puerta.vaivenDePuesto({ ticket: TICKET, puestoIdDelQr: 'p2', puestos: lista });
+  assert.equal(dosSale.tipo, 'salida', 'la persona 2 no constaba dentro');
+
+  /* La 1 vuelve. */
+  const vuelve = await puerta.vaivenDePuesto({ ticket: TICKET, puestoIdDelQr: 'p1', puestos: lista });
+  assert.equal(vuelve.tipo, 'entrada');
+});
+
+test('con el QR de la boleta se elige por el sentido: fuera para entrar, dentro para salir', async () => {
+  /* Una sola credencial para toda la mesa: no hay forma de saber cuál de los
+     cuatro la enseña, pero la CUENTA tiene que quedar bien. */
+  const sim = baseSimulada(mesaConMovimientos());
+  const puerta = cargarPuerta(sim);
+  const lista = sim.datos.ticket_puestos;
+
+  const primera = await puerta.vaivenDePuesto({ ticket: TICKET, puestoIdDelQr: null, puestos: lista });
+  assert.equal(primera.tipo, 'entrada');
+  assert.equal(primera.puesto.orden, 1, 'se eligió un puesto al azar en vez del primero libre');
+  sim.datos.ticket_movimientos.push({
+    ticket_id: 't1', puesto_id: primera.puesto.id, tipo: 'entrada',
+    created_at: '2026-09-13T20:01:00Z', zona: null, zona_id: null,
+  });
+
+  /* El segundo escaneo es otra entrada —queda gente fuera—, no una salida. */
+  const segunda = await puerta.vaivenDePuesto({ ticket: TICKET, puestoIdDelQr: null, puestos: lista });
+  assert.equal(segunda.tipo, 'entrada');
+  assert.notEqual(segunda.puesto.id, primera.puesto.id, 'contó dos veces a la misma persona');
+
+  /* Pidiendo salida explícita, sale alguien que esté dentro. */
+  const salida = await puerta.vaivenDePuesto({
+    ticket: TICKET, puestoIdDelQr: null, tipoPedido: 'salida', puestos: lista,
+  });
+  assert.equal(salida.puesto.id, primera.puesto.id, 'sacó a alguien que no estaba dentro');
+});
+
+test('no se puede sacar a quien no entró, ni meter a quien ya está dentro', async () => {
+  const sim = baseSimulada(mesaConMovimientos());
+  const puerta = cargarPuerta(sim);
+  const lista = sim.datos.ticket_puestos;
+
+  const sinNadie = await puerta.vaivenDePuesto({
+    ticket: TICKET, puestoIdDelQr: null, tipoPedido: 'salida', puestos: lista,
+  });
+  assert.equal(sinNadie.ok, false);
+  assert.equal(sinNadie.motivo, 'nadie_dentro');
+
+  /* Con los cuatro dentro, una entrada más no tiene a quién meter. */
+  sim.datos.ticket_movimientos = lista.map((p, i) => ({
+    ticket_id: 't1', puesto_id: p.id, tipo: 'entrada',
+    created_at: `2026-09-13T20:0${i}:00Z`, zona: null, zona_id: null,
+  }));
+  const llena = await puerta.vaivenDePuesto({
+    ticket: TICKET, puestoIdDelQr: null, tipoPedido: 'entrada', puestos: lista,
+  });
+  assert.equal(llena.ok, false);
+  assert.equal(llena.motivo, 'todos_dentro');
+});
+
+test('quien entró por el check-in cuenta como dentro aunque no tenga movimientos', async () => {
+  /* Si no, la primera salida de la noche se registraría como una entrada y el
+     aforo sumaría a alguien que ya estaba contado. */
+  const sim = baseSimulada(mesaConMovimientos());
+  const puerta = cargarPuerta(sim);
+  sim.datos.ticket_puestos[0].estado = 'usado';
+  const lista = sim.datos.ticket_puestos;
+
+  const dentro = await puerta.quienEstaDentro({ puestos: lista });
+  assert.deepEqual(dentro, ['p1']);
+
+  const v = await puerta.vaivenDePuesto({ ticket: TICKET, puestoIdDelQr: 'p1', puestos: lista });
+  assert.equal(v.tipo, 'salida', 'quien ya había entrado volvió a «entrar»');
+});
+
+test('el vaivén de una zona no hereda la entrada al recinto', async () => {
+  /* Se puede estar dentro del recinto y fuera de una sala. */
+  const sim = baseSimulada(mesaConMovimientos());
+  const puerta = cargarPuerta(sim);
+  sim.datos.ticket_puestos[0].estado = 'usado';
+  const lista = sim.datos.ticket_puestos;
+
+  const enZona = await puerta.quienEstaDentro({ puestos: lista, zona: { id: 'z1', nombre: 'Sala A' } });
+  assert.deepEqual(enZona, [], 'entrar al recinto contó como entrar a la sala');
+});
+
+test('una boleta de una persona no cambia de camino en el reingreso', async () => {
+  const sim = baseSimulada({ ticket_puestos: [], ticket_movimientos: [], tickets: [TICKET] });
+  const puerta = cargarPuerta(sim);
+  const v = await puerta.vaivenDePuesto({ ticket: TICKET, puestoIdDelQr: null });
+  assert.equal(v.aplica, false);
 });

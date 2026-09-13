@@ -291,3 +291,33 @@ test('los cinco escáneres rechazan un QR de puesto rotado', () => {
   assert.match(lookup, /r\.puesto_id/, 'resolverTicket ignora el puesto del QR');
   assert.match(lookup, /se transfirió/, 'resolverTicket no rechaza un token rotado');
 });
+
+/* ── Y que el reingreso lleve el vaivén por persona ───────────────────── */
+
+/* Alternar según el último movimiento de la BOLETA es correcto con una persona
+   por boleta, y sólo con eso. Con cuatro compartiéndola, el escáner alternaba
+   entre ellas y el aforo acababa diciendo que no había nadie mientras entraban
+   cuatro. Ningún error a la vista: el peor modo de fallo para el número que
+   decide si se cierra una puerta. */
+test('el reingreso pregunta por el puesto antes de alternar', () => {
+  const ruta = leer('routes/clientes.js');
+  const reingreso = ruta.slice(ruta.indexOf("router.post('/:eventoId/reingreso'"));
+
+  assert.match(reingreso, /vaivenDePuesto\(/,
+    'el reingreso volvió a alternar por boleta: en una mesa eso cuenta entradas como salidas');
+  assert.match(reingreso, /puesto_id/,
+    'el movimiento no dice de quién es, así que el vaivén vuelve a ser de la mesa entera');
+  /* La alternancia vieja sigue ahí para las boletas de una persona, que es
+     donde es correcta — no se ha sustituido, se ha acotado. */
+  assert.match(reingreso, /dentroAhora/,
+    'se perdió el vaivén de siempre para las boletas de una persona');
+});
+
+test('la 0125 existe y añade el puesto al movimiento', () => {
+  const sql = leer('db/migrations/0125_el_vaiven_es_de_cada_persona.sql');
+  assert.match(sql, /alter table public\.ticket_movimientos/);
+  assert.match(sql, /add column if not exists puesto_id/);
+  /* Sin índice, cada escaneo recorrería todos los movimientos del evento —
+     decenas de miles en un evento grande, y creciendo toda la noche. */
+  assert.match(sql, /create index if not exists ticket_movimientos_puesto_idx/);
+});
