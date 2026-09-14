@@ -5,6 +5,7 @@ const sillaDeLaCompra = require('../lib/sillaDeLaCompra.js');
 const { personasDeTicket } = require('../lib/cuantasPersonas.js');
 const { verifySupabaseJWT } = require('../middleware/auth.js');
 const { verifyTicketQR, signTicketQR } = require('../lib/qr.js');
+const credenciales = require('../lib/credenciales.js');
 const { horaDelEscaneo } = require('../lib/horaDeEscaneo.js');
 const { otorgarPuntos, otorgarBadge, reglasPuntosDeEvento } = require('../lib/gamificacion.js');
 const { dispatch } = require('../lib/webhooks.js');
@@ -939,14 +940,18 @@ router.post('/:eventoId/checkin', sesion('Lo opera quien está en la puerta: la 
     /* El puesto que venga dentro del QR («puesto 2 de 4»). `null` en un QR de
        boleta normal, que es la inmensa mayoría. */
     let puestoIdDelQr = null;
+    /* La generación de la credencial presentada (0127). Cero en todo lo firmado
+       antes, que es lo que la hace compatible sin reemitir nada. */
+    let genDelQr = 0;
     if (qr_token) {
       const r = verifyTicketQR(qr_token);
       if (!r.ok) return res.status(400).json({ error: 'QR inválido.', detalle: r.error });
       if (r.evento_id !== eventoId) return res.status(400).json({ error: 'Este QR es de otro evento.' });
       puestoIdDelQr = r.puesto_id || null;
-      ticketQuery = supabase.from('tickets').select(`*, tipo:ticket_types!ticket_type_id(nombre)`).eq('id', r.ticket_id).maybeSingle();
+      genDelQr = r.gen || 0;
+      ticketQuery = supabase.from('tickets').select(`*, tipo:ticket_types!ticket_type_id(nombre, vigencia_desde, vigencia_hasta, requiere_autorizacion)`).eq('id', r.ticket_id).maybeSingle();
     } else {
-      ticketQuery = supabase.from('tickets').select(`*, tipo:ticket_types!ticket_type_id(nombre)`).eq('codigo', codigo.toUpperCase().trim()).eq('evento_id', eventoId).maybeSingle();
+      ticketQuery = supabase.from('tickets').select(`*, tipo:ticket_types!ticket_type_id(nombre, vigencia_desde, vigencia_hasta, requiere_autorizacion)`).eq('codigo', codigo.toUpperCase().trim()).eq('evento_id', eventoId).maybeSingle();
     }
 
     const { data: ticket, error: e1 } = await ticketQuery;
@@ -975,6 +980,43 @@ router.post('/:eventoId/checkin', sesion('Lo opera quien está en la puerta: la 
         checked_in_at: ticket.checked_in_at,
       });
     }
+    /* ── ¿Esta credencial abre, ahora, por aquí? (0127) ───────────────────
+     *
+     * Tres preguntas que antes no se hacían y que el montaje obliga a hacer:
+     * si la credencial está VIGENTE, si esta puerta está ABIERTA a esta hora, y
+     * si alguien RESPONDIÓ por esta persona. Las tres viven en
+     * `lib/credenciales.js` y valen igual para la puerta del evento y para la
+     * del galpón: escritas dos veces, una de las dos acabaría diciendo lo
+     * contrario, con la persona delante.
+     *
+     * Estas tres SÍ bloquean, al revés que el aviso de «esta boleta no
+     * corresponde a esta puerta» de más abajo. La diferencia es a propósito:
+     * aquella es una boleta buena en la puerta equivocada y el staff decide;
+     * éstas son una credencial que no vale ahora mismo, y el sentido entero del
+     * control de montaje es que ahí no haya criterio que ejercer.
+     *
+     * En un evento de hoy no hacen nada: sin vigencia, sin horario y sin
+     * `requiere_autorizacion`, `puedeAbrir` contesta que sí siempre. */
+    const puestoDelQr = puestoIdDelQr
+      ? losPuestos.find(p => p.id === puestoIdDelQr) || null
+      : null;
+
+    const veredicto = credenciales.puedeAbrir({
+      tipo: ticket.tipo, puesto: puestoDelQr, puerta,
+      genDelToken: genDelQr, ahora: new Date(checkinAt).getTime(),
+    });
+    if (!veredicto.ok) {
+      return res.status(veredicto.causa === 'transferido' ? 409 : 403).json({
+        error: veredicto.motivo,
+        causa: veredicto.causa,
+        sound: 'error',
+        /* La ficha viaja también en el rechazo: quien está en la puerta tiene
+           que poder decirle a la persona qué credencial es la suya y a quién
+           preguntar, no sólo que no pasa. */
+        ficha: credenciales.fichaDeLaPuerta({ puesto: puestoDelQr, ticket }),
+      });
+    }
+
     /* estado 'emitido' (pago pendiente) — depende. Aceptamos pero advertimos. */
     let advertencia = ticket.estado === 'emitido' ? 'Boleta emitida sin pago confirmado.' : null;
 
@@ -991,8 +1033,10 @@ router.post('/:eventoId/checkin', sesion('Lo opera quien está en la puerta: la 
      * Con varios puestos, lo que se consume es UN puesto y no la boleta. Dos
      * cosas pasan aquí que antes no pasaban:
      *
-     *   · el QR de un puesto se compara con el que guarda la base, así que un
-     *     token rotado por una transferencia deja de abrir de verdad;
+     *   · la generación del QR de un puesto se compara con la que guarda la
+     *     base, así que una credencial de antes de una transferencia deja de
+     *     abrir de verdad — y un reenvío del correo, que también cambia el
+     *     token pero no la generación, sigue abriendo (0127);
      *   · la boleta sólo se marca usada cuando entra el último.
      *
      * Mientras quede sitio se responde desde aquí. Cuando se agota, se sigue
@@ -1000,7 +1044,7 @@ router.post('/:eventoId/checkin', sesion('Lo opera quien está en la puerta: la 
      * así una mesa cuenta una asistencia y no cuatro. */
     if (losPuestos.length > 1) {
       const paso = await puertaDePuestos.consumirPuesto({
-        ticket, puestoIdDelQr, token: qr_token || null, at: checkinAt,
+        ticket, puestoIdDelQr, token: qr_token || null, gen: genDelQr, at: checkinAt,
         puestos: losPuestos,
       });
 
@@ -1114,7 +1158,14 @@ router.post('/:eventoId/checkin', sesion('Lo opera quien está en la puerta: la 
       userId: updated.user_id, nombre: updated.guest_nombre || 'Asistente', acceso: puerta?.nombre || '',
     });
 
-    res.json({ ok: true, ticket: updated, advertencia, sound: 'ok' });
+    res.json({
+      ok: true, ticket: updated, advertencia, sound: 'ok',
+      /* Nombre, documento y foto para comparar con la cédula. En una boleta
+         normal casi todo va en `null` y la pantalla no enseña nada de más; en
+         una credencial de montaje es la comprobación de verdad — la que no
+         hace el software. */
+      ficha: credenciales.fichaDeLaPuerta({ puesto: puestoDelQr, ticket }),
+    });
   } catch (e) {
     res.status(e.message === 'No autorizado.' ? 403 : 400).json({ error: e.message });
   }

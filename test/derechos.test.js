@@ -256,13 +256,18 @@ test('la unicidad vive en la base, no en la aplicación', () => {
     'la ruta tiene que saber leer el choque contra el índice');
 });
 
-test('la ruta compara el token del puesto con el que guarda la base', () => {
+test('la ruta mira la generación de la credencial, no el texto del token', () => {
   /* Un puesto transferido rota su credencial, pero el token viejo sigue
-     llevando una firma válida y los QR no caducan. Sin esta comparación, quien
-     vendió su puesto recoge el almuerzo del comprador. Es el mismo agujero que
-     se cerró en la puerta. */
+     llevando una firma válida y los QR no caducan. Sin comprobar nada, quien
+     vendió su puesto recoge el almuerzo del comprador.
+
+     Y la comprobación tiene que ser la generación (0127) y no el texto: un
+     reenvío del correo también cambia el token, y ahí no se transfirió nada —
+     comparar cadenas le cerraba la puerta a quien llegaba con el primer
+     correo. */
   const ruta = leer('routes/derechos.js');
-  assert.match(ruta, /p\.qr_token && p\.qr_token !== quien\.token/);
+  assert.match(ruta, /credenciales\.credencialAlDia/);
+  assert.doesNotMatch(ruta, /qr_token !== quien\.token/);
 });
 
 test('entregar es un permiso propio y no el de la puerta', () => {

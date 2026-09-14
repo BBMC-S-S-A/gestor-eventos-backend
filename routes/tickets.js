@@ -43,6 +43,12 @@ const CAMPOS_EDITABLES = [
      porque el panel viejo, mientras no se despliegue el nuevo, es quien la
      escribe —y un trigger mantiene las dos de acuerdo. */
   'crea', 'crea_torneo_id',
+  /* 0127 · La credencial: desde y hasta cuándo ABRE (distinto de `venta_hasta`,
+     que es hasta cuándo se VENDE), si las personas que la usan tienen que estar
+     autorizadas una por una, y si el tipo sale a la venta en la landing.
+     Los tres nacen apagados, así que una boleta que nadie configure se comporta
+     exactamente igual que antes. */
+  'vigencia_desde', 'vigencia_hasta', 'requiere_autorizacion', 'visible_publico',
   /* 0121: qué papel juega en la lista de compra —la entrada al evento, una
      actividad de dentro, o un complemento—. Es sólo presentación: no cambia
      qué se emite, ni el precio, ni el cupo. */
@@ -64,6 +70,8 @@ function sanitize(body, defaults = {}) {
       let v = body[k];
       if (v === '' && (k.includes('precio') || k.includes('hasta') || k === 'cupo')) v = null;
       if (k === 'es_expositor') v = Boolean(v);
+      if (k === 'requiere_autorizacion' || k === 'visible_publico') v = Boolean(v);
+      if ((k === 'vigencia_desde' || k === 'vigencia_hasta') && (v === '' || v === null)) v = null;
       if (k === 'crea_torneo_id' && v === '') v = null;
       out[k] = v;
     }
@@ -92,6 +100,14 @@ function sanitize(body, defaults = {}) {
 
   if ('rol' in out && !ROL_VALIDO.includes(out.rol)) {
     throw new Error(`El papel de la boleta sólo puede ser: ${ROL_VALIDO.join(', ')}.`);
+  }
+
+  /* Una vigencia que termina antes de empezar deja una credencial que no abre
+     nunca, y no da ningún error: se descubre en la puerta, con la cuadrilla
+     esperando fuera del galpón. */
+  if (out.vigencia_desde && out.vigencia_hasta
+      && new Date(out.vigencia_hasta) <= new Date(out.vigencia_desde)) {
+    throw new Error('La credencial terminaría de valer antes de empezar.');
   }
   return out;
 }

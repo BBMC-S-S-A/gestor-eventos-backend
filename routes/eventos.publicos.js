@@ -973,7 +973,8 @@ router.get('/slug/:slug', async (req, res) => {
       categoria:categorias(slug, nombre),
       organizador:profiles!owner_id(nombre, handle, avatar_url, empresa, branding, empresa_logo_url),
       ticket_types(id, nombre, descripcion, precio, currency, cupo, vendidos,
-                   early_bird_precio, early_bird_hasta, venta_hasta, orden, activo)
+                   early_bird_precio, early_bird_hasta, venta_hasta, orden, activo,
+                   visible_publico)
     `)
     .eq('slug', slug)
     .is('deleted_at', null)
@@ -1004,6 +1005,15 @@ router.get('/slug/:slug', async (req, res) => {
 
   evento.ticket_types = (evento.ticket_types || [])
     .filter(t => t.activo)
+    /* 0127 · Las credenciales internas —montaje, prensa, proveedores— no salen
+       en la landing.
+       Hasta ahora lo único que escondía un tipo era `activo`, y eso lo apaga
+       entero: tampoco se puede emitir. Así que una credencial de montaje o
+       aparecía a la venta junto a la entrada general, o no existía.
+       `!== false` y no `=== true` a propósito: en un servidor sin la migración
+       aplicada la columna no viene y `undefined` tiene que significar visible,
+       que es lo que hacen todas las boletas de hoy. */
+    .filter(t => t.visible_publico !== false)
     .sort((a, b) => (a.orden || 0) - (b.orden || 0));
 
   /* Qué ES cada boleta: la entrada al evento, una actividad de dentro, o un

@@ -236,17 +236,30 @@ test('emitirPuestos nunca hace fracasar una venta ya cobrada', () => {
 /* `verifyTicketQR` dice que la firma es nuestra y no está tocada. No puede
    decir más: es criptografía, no memoria. Y como los QR no caducan, un token
    viejo pasa esa comprobación para siempre. Para un puesto eso no basta,
-   porque su credencial ROTA al transferirlo — y lo único que distingue al
-   viejo del nuevo es que ya no es el que guarda la base. */
-test('el veredicto del puesto compara contra lo que guarda la base', () => {
-  const puesto = { id: 'p1', ticket_id: 't1', qr_token: 'EL-BUENO', estado: 'asignado' };
+   porque su credencial ROTA al transferirlo.
 
+   Lo que distingue al viejo del nuevo NO es que el texto del token cambiara:
+   eso pasa también al reenviar un correo, y ahí no ha cambiado nada. Es la
+   GENERACIÓN, que sube sólo al transferir (0127). */
+test('el veredicto del puesto mira la generación, no el texto del token', () => {
+  const puesto = { id: 'p1', ticket_id: 't1', qr_token: 'EL-BUENO', credencial_gen: 0, estado: 'asignado' };
+
+  assert.equal(p.veredictoDePuesto({ puesto, token: 'EL-BUENO', gen: 0 }).ok, true);
+
+  /* Reenvío: la base guarda otro texto, misma generación. Quien llegue con el
+     correo anterior tiene que entrar — antes se le cerraba la puerta. */
+  assert.equal(p.veredictoDePuesto({ puesto, token: 'EL-DEL-PRIMER-CORREO', gen: 0 }).ok, true);
+
+  /* Y sin generación, que es lo que llevan los QR de antes de la 0127. */
   assert.equal(p.veredictoDePuesto({ puesto, token: 'EL-BUENO' }).ok, true);
 
-  /* El del que vendió su puesto: firma válida, pero ya no es el vigente. */
-  const rotado = p.veredictoDePuesto({ puesto, token: 'EL-VIEJO' });
+  /* Transferencia: el puesto va por la generación 1 y el del vendedor por la
+     0. Firma válida y puerta cerrada, que es lo correcto. */
+  const transferido = { ...puesto, credencial_gen: 1 };
+  const rotado = p.veredictoDePuesto({ puesto: transferido, token: 'EL-VIEJO', gen: 0 });
   assert.equal(rotado.ok, false);
   assert.equal(rotado.motivo, 'rotado');
+  assert.equal(p.veredictoDePuesto({ puesto: transferido, token: 'EL-NUEVO', gen: 1 }).ok, true);
 
   /* A medio transferir: sin credencial, no abre. */
   assert.equal(p.veredictoDePuesto({ puesto: { ...puesto, qr_token: null }, token: 'x' }).motivo, 'sin_token');
@@ -256,6 +269,23 @@ test('el veredicto del puesto compara contra lo que guarda la base', () => {
   assert.equal(p.veredictoDePuesto({ puesto: null, token: 'EL-BUENO' }).motivo, 'no_existe');
   /* De otra boleta: el token dice una cosa y la fila otra. */
   assert.equal(p.veredictoDePuesto({ puesto, token: 'EL-BUENO', ticketId: 't2' }).motivo, 'otra_boleta');
+});
+
+test('transferir sube la generación; nada más la mueve', () => {
+  /* Es lo que sostiene todo lo de arriba. Si `aplicarTransferencia` dejara de
+     subirla, el QR del vendedor volvería a abrir y ninguna de las pruebas
+     anteriores lo notaría: todas le pasan la generación a mano. */
+  const puesto = { id: 'p1', evento_id: 'e1', nombre: 'Quien vende', credencial_gen: 0 };
+  const t = p.aplicarTransferencia({ puesto, destino: { nombre: 'Quien compra' } });
+
+  assert.equal(t.puesto.credencial_gen, 1);
+  assert.equal(t.puesto.qr_token, null, 'la credencial vieja se borra hasta firmar la nueva');
+  /* Y quien recibe no hereda la autorización de quien se la pasó: en una
+     credencial de montaje, eso es justo lo que no puede comprarse. */
+  assert.equal(t.puesto.autorizado_at, null);
+
+  const segunda = p.aplicarTransferencia({ puesto: { ...puesto, credencial_gen: 1 }, destino: { nombre: 'Y otro' } });
+  assert.equal(segunda.puesto.credencial_gen, 2);
 });
 
 test('todos los motivos de puerta cerrada tienen algo que decirle a quien está en la fila', () => {
