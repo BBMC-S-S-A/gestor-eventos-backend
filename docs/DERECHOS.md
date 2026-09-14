@@ -73,6 +73,23 @@ Tres tablas. Están comentadas en detalle dentro de la migración; aquí el resu
   recibió** (`puesto_id`, o `ticket_id` si es de grupo), **quién lo entregó**
   (`operador_id`), la hora real, y el origen (`qr` / `manual` / `cola`).
 
+### El corte a MySQL
+
+Cuando se apague Supabase, esta regla es lo primero que hay que mirar. MySQL no
+tiene índices únicos parciales, así que la traducción **no** es el mismo índice:
+va sobre dos columnas generadas (`titular_id`, `ventana_key`) que resuelven los
+nulos. Está escrita y comentada en `db/migraciones/007_derechos_y_credenciales.sql`.
+
+La traducción ingenua —un único sobre `(derecho_id, ventana_id, puesto_id, uso_num)`—
+parece la misma y no lo es: dos NULL nunca son iguales, así que **los derechos
+de grupo se podrían entregar tantas veces como se quiera y nadie vería un
+error**. Es el modo de fallo de siempre.
+
+Y en el código, `esDuplicado` reconoce los dos motores: MySQL no dice 23505 ni
+«duplicate key», dice 1062 y «Duplicate entry». Sin eso, el día del corte una
+segunda entrega contestaría 500 en vez de «ya lo recibió», y quien reparte daría
+el almuerzo dos veces «porque la máquina dio error».
+
 ### La decisión que sostiene todo
 
 El «uno por persona por ventana» es un **índice único**, no un `if`:

@@ -136,12 +136,21 @@ test('un hueco en el medio se reutiliza', () => {
   assert.equal(D.siguienteUso(AGUAS, [{ uso_num: 2 }]), 1);
 });
 
-test('el duplicado se reconoce por el código de Postgres, no por el texto', () => {
+test('el duplicado se reconoce por el código, no por el texto — y en los dos motores', () => {
   /* El texto del error cambia con el idioma del servidor. Una comparación de
      cadenas que falle aquí convierte un «ya comió» en un error 500. */
   assert.equal(D.esDuplicado({ code: '23505', message: 'cualquier cosa en otro idioma' }), true);
   assert.equal(D.esDuplicado({ code: '23503', message: 'foreign key' }), false);
   assert.equal(D.esDuplicado(null), false);
+
+  /* MySQL, que es a donde va esto cuando se apague Supabase. Su error no lleva
+     23505 ni dice «duplicate key»: dice «Duplicate entry» y trae 1062. Con la
+     comprobación de sólo Postgres, el día del corte una segunda entrega
+     contestaría 500 en vez de «ya lo recibió» — y quien reparte acabaría dando
+     el almuerzo dos veces «porque la máquina dio error». */
+  assert.equal(D.esDuplicado({ code: 'ER_DUP_ENTRY', errno: 1062, message: "Duplicate entry 'x' for key 'derecho_consumo_unico'" }), true);
+  assert.equal(D.esDuplicado({ errno: 1062 }), true);
+  assert.equal(D.esDuplicado({ code: 'ER_NO_SUCH_TABLE', errno: 1146 }), false);
 });
 
 /* ── Lo que ve quien entrega ─────────────────────────────────────────── */
