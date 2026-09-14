@@ -6,6 +6,7 @@ const { personasDeTicket } = require('../lib/cuantasPersonas.js');
 const { verifySupabaseJWT } = require('../middleware/auth.js');
 const { verifyTicketQR, signTicketQR } = require('../lib/qr.js');
 const credenciales = require('../lib/credenciales.js');
+const archivos = require('../modules/archivos');
 const { horaDelEscaneo } = require('../lib/horaDeEscaneo.js');
 const { otorgarPuntos, otorgarBadge, reglasPuntosDeEvento } = require('../lib/gamificacion.js');
 const { dispatch } = require('../lib/webhooks.js');
@@ -1013,7 +1014,7 @@ router.post('/:eventoId/checkin', sesion('Lo opera quien está en la puerta: la 
         /* La ficha viaja también en el rechazo: quien está en la puerta tiene
            que poder decirle a la persona qué credencial es la suya y a quién
            preguntar, no sólo que no pasa. */
-        ficha: credenciales.fichaDeLaPuerta({ puesto: puestoDelQr, ticket }),
+        ficha: credenciales.fichaDeLaPuerta({ puesto: puestoDelQr, ticket, enlace: archivos.enlaceFirmado }),
       });
     }
 
@@ -1164,7 +1165,7 @@ router.post('/:eventoId/checkin', sesion('Lo opera quien está en la puerta: la 
          normal casi todo va en `null` y la pantalla no enseña nada de más; en
          una credencial de montaje es la comprobación de verdad — la que no
          hace el software. */
-      ficha: credenciales.fichaDeLaPuerta({ puesto: puestoDelQr, ticket }),
+      ficha: credenciales.fichaDeLaPuerta({ puesto: puestoDelQr, ticket, enlace: archivos.enlaceFirmado }),
     });
   } catch (e) {
     res.status(e.message === 'No autorizado.' ? 403 : 400).json({ error: e.message });

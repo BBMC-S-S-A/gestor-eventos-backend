@@ -37,6 +37,9 @@ const { verifySupabaseJWT } = require('../middleware/auth.js');
 const { assertPermiso } = require('../lib/acceso.js');
 const { auditar } = require('../lib/auditar.js');
 const { signPuestoQR } = require('../lib/qr.js');
+const puestos = require('../lib/puestos.js');
+const archivos = require('../modules/archivos');
+const { fotoParaVer } = require('../lib/credenciales.js');
 
 const COLS = `id, ticket_id, evento_id, orden, nombre, email, documento, telefono, foto_url,
               estado, autorizado_at, autorizado_por, credencial_gen, usado_at`;
@@ -81,7 +84,7 @@ async function cargarBoleta(req, res, next) {
   const { data: ticket, error } = await supabase
     .from('tickets')
     .select(`id, evento_id, estado, codigo, guest_nombre,
-             tipo:ticket_types!ticket_type_id(nombre, requiere_autorizacion, vigencia_desde, vigencia_hasta)`)
+             tipo:ticket_types!ticket_type_id(nombre, requiere_autorizacion, vigencia_desde, vigencia_hasta, autoriza)`)
     .eq('codigo', cod).maybeSingle();
   if (error) return res.status(500).json({ error: error.message });
   if (!ticket) return res.status(404).json({ error: 'Boleta no encontrada.' });
@@ -106,6 +109,10 @@ publico.get('/:codigo', cargarBoleta, async (req, res) => {
        servir hasta que alguien la apruebe. Enterarse de eso en la puerta es
        llegar a las seis de la mañana para que te digan que no. */
     requiere_autorizacion: Boolean(req.boleta.tipo?.requiere_autorizacion),
+    /* Si esta boleta puede resolver una sustitución por su cuenta o hay que
+       esperar a la organización. La pantalla lo dice ANTES, no cuando ya está
+       la persona en la puerta. */
+    puedo_autorizar: req.boleta.tipo?.autoriza === 'responsable',
     vigencia: {
       desde: req.boleta.tipo?.vigencia_desde || null,
       hasta: req.boleta.tipo?.vigencia_hasta || null,
@@ -180,6 +187,112 @@ publico.patch('/:codigo/puestos/:puestoId', cargarBoleta, async (req, res) => {
   }
 });
 
+/* POST /acreditar/:codigo/puestos/:puestoId/sustituir
+ *
+ * «El que iba se enfermó. Vino el primo.» (0128)
+ *
+ * Es el caso que decide si toda la acreditación sirve o se rodea: sin una
+ * respuesta para él, el guardia acaba dejando pasar de palabra y no queda
+ * registro de nadie.
+ *
+ * Sustituir NO es corregir un nombre: es cambiar de persona. Por eso pasa por
+ * `aplicarTransferencia`, que ya existía para la reventa y hace las tres cosas
+ * que hay que hacer —sube la generación, borra la credencial y limpia la
+ * autorización—. Sin eso, el QR del que se enfermó seguiría abriendo: serían
+ * dos credenciales buenas para un puesto.
+ *
+ * Y el rastro va a `puesto_transferencias`, que es donde ya vive «quién ocupó
+ * este sitio antes». Un histórico aparte para las sustituciones sería la misma
+ * pregunta contestada en dos tablas.
+ */
+publico.post('/:codigo/puestos/:puestoId/sustituir', cargarBoleta, async (req, res) => {
+  const { puestoId } = req.params;
+  try {
+    const destino = datosDeLaPersona(req.body || {});
+    if (!destino.nombre) return res.status(400).json({ error: 'Hace falta el nombre de quien viene.' });
+
+    const { data: previo } = await supabase
+      .from('ticket_puestos').select(COLS)
+      .eq('id', puestoId).eq('ticket_id', req.boleta.id).maybeSingle();
+    if (!previo) return res.status(404).json({ error: 'Ese puesto no es de esta boleta.' });
+    if (previo.estado === 'usado') {
+      return res.status(409).json({ error: 'Esa persona ya entró: no se puede sustituir a quien está dentro.' });
+    }
+
+    const { puesto: cambios, rastro } = puestos.aplicarTransferencia({
+      puesto: previo, destino, via: 'titular',
+    });
+    /* `aplicarTransferencia` no conoce estos dos: son de la 0127 y sólo tienen
+       sentido en una acreditación. */
+    cambios.telefono = destino.telefono ?? null;
+    cambios.foto_url = destino.foto_url ?? null;
+
+    const puedeElResponsable = req.boleta.tipo?.autoriza === 'responsable';
+    const exigeAutorizacion = Boolean(req.boleta.tipo?.requiere_autorizacion);
+
+    /* Quien tiene el código de la boleta responde por el sustituto, cuando el
+       evento lo permitió. No es una excepción a la autorización: es un eslabón
+       más en la misma cadena —el evento respondió por el stand, y el stand
+       responde por su cuadrilla—, y queda escrito con nombre. */
+    if (exigeAutorizacion && puedeElResponsable) {
+      if (!destino.documento) {
+        return res.status(400).json({ error: 'Para responder por esta persona hace falta su documento.' });
+      }
+      cambios.autorizado_at = new Date().toISOString();
+      cambios.autorizado_por = `Responsable de ${req.boleta.codigo}`;
+    }
+
+    /* La credencial nueva se firma con la generación nueva. Si el tipo exige
+       autorización y aquí no se dio, no se firma nada: el sustituto queda
+       registrado y esperando, que es mejor que entrar de palabra. */
+    if (!exigeAutorizacion || cambios.autorizado_at) {
+      cambios.qr_token = signPuestoQR({
+        ticket_id: req.boleta.id, evento_id: req.boleta.evento_id, codigo: req.boleta.codigo,
+        puesto_id: previo.id, orden: previo.orden, gen: cambios.credencial_gen,
+      });
+    }
+
+    const { data, error } = await supabase
+      .from('ticket_puestos').update(cambios)
+      .eq('id', puestoId).eq('ticket_id', req.boleta.id)
+      /* La generación de la que se parte viaja en el `update`: si dos personas
+         del stand sustituyen a la vez desde dos teléfonos, la segunda no
+         encuentra fila y se entera, en vez de pisar a la primera dejando una
+         credencial firmada que ya no corresponde a nadie. */
+      .eq('credencial_gen', previo.credencial_gen || 0)
+      .select(COLS).maybeSingle();
+    if (error) return res.status(500).json({ error: error.message });
+    if (!data) return res.status(409).json({ error: 'Alguien acaba de cambiar a esta persona. Vuelve a mirar.' });
+
+    /* El rastro después de la escritura y sin cortar la respuesta si falla:
+       perder una línea de histórico es malo, pero dejar al primo fuera del
+       galpón porque no se pudo escribir el histórico es peor. */
+    try {
+      await supabase.from('puesto_transferencias').insert(rastro);
+    } catch (e) {
+      console.error(`[acreditar] sin rastro de la sustitución ${puestoId}: ${e.message}`);
+    }
+
+    await auditar({ user: null }, req.boleta.evento_id, 'puesto_sustituido', {
+      entidad: 'puesto', entidadId: puestoId,
+      detalle: {
+        boleta: req.boleta.codigo, de: previo.nombre, a: data.nombre,
+        autorizado_por_el_responsable: Boolean(cambios.autorizado_at),
+      },
+    });
+
+    res.json({
+      puesto: verPuesto(data),
+      /* Que la pantalla pueda decir la verdad completa: la credencial anterior
+         ya no abre, pase lo que pase con la nueva. */
+      credencial_anterior_anulada: true,
+      esperando_autorizacion: exigeAutorizacion && !cambios.autorizado_at,
+    });
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
 /* ══════════════ 2 · El panel: responder por esta gente ══════════════ */
 
 const panel = express.Router();
@@ -222,6 +335,55 @@ panel.get('/:eventoId/acreditados', exige(PERMS), async (req, res) => {
         necesita_autorizacion: Boolean(p.boleta?.tipo?.requiere_autorizacion),
       })),
     });
+  } catch (e) {
+    res.status(e.message === 'No autorizado.' ? 403 : 400).json({ error: e.message });
+  }
+});
+
+/* PATCH /eventos/:eventoId/acreditados/:puestoId — corregir a la persona.
+ *
+ * Existe además del enlace público porque el día del montaje la corrección se
+ * hace en el mostrador, con la persona delante y el documento en la mano: «me
+ * escribieron mal la cédula» no se arregla mandando a la cuadrilla a buscar a
+ * quien tiene el código del stand.
+ *
+ * Escribe lo mismo que el enlace público, y con la misma consecuencia: cambiar
+ * de nombre o de documento tumba la autorización que hubiera. */
+panel.patch('/:eventoId/acreditados/:puestoId', exige(PERMS), async (req, res) => {
+  const { eventoId, puestoId } = req.params;
+  try {
+    await assertPermiso(eventoId, req.user.id, PERMS, 'id, owner_id');
+    const datos = datosDeLaPersona(req.body || {});
+    if (!Object.keys(datos).length) return res.status(400).json({ error: 'Nada que cambiar.' });
+
+    const { data: previo } = await supabase
+      .from('ticket_puestos').select(COLS).eq('id', puestoId).eq('evento_id', eventoId).maybeSingle();
+    if (!previo) return res.status(404).json({ error: 'Esa persona no está en este evento.' });
+
+    const cambios = { ...datos };
+    if (datos.nombre && previo.estado === 'libre') {
+      cambios.estado = 'asignado';
+      cambios.asignado_at = new Date().toISOString();
+    }
+    const cambioDePersona = (datos.nombre && datos.nombre !== previo.nombre)
+                         || (datos.documento && datos.documento !== previo.documento);
+    if (cambioDePersona && previo.autorizado_at) {
+      cambios.autorizado_at = null;
+      cambios.autorizado_por = null;
+      cambios.qr_token = null;
+    }
+
+    const { data, error } = await supabase
+      .from('ticket_puestos').update(cambios)
+      .eq('id', puestoId).eq('evento_id', eventoId)
+      .select(COLS).single();
+    if (error) return res.status(500).json({ error: error.message });
+
+    await auditar(req, eventoId, 'acreditado_editado', {
+      entidad: 'puesto', entidadId: puestoId,
+      detalle: { campos: Object.keys(datos), volvio_a_pendiente: Boolean(cambioDePersona && previo.autorizado_at) },
+    });
+    res.json({ acreditado: verPuesto(data) });
   } catch (e) {
     res.status(e.message === 'No autorizado.' ? 403 : 400).json({ error: e.message });
   }
@@ -324,7 +486,9 @@ function verPuesto(p) {
     email: p.email,
     documento: p.documento,
     telefono: p.telefono,
-    foto_url: p.foto_url,
+    /* Firmada y con caducidad: es la cara de un trabajador junto a su
+       documento, y una ruta suelta en una respuesta es media filtración. */
+    foto_url: fotoParaVer(p.foto_url, archivos.enlaceFirmado),
     estado: p.estado,
     autorizado_at: p.autorizado_at,
     autorizado_por: p.autorizado_por,

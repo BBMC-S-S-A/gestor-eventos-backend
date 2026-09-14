@@ -105,7 +105,13 @@ function crearRutas({ servicio, sesionOpcional, exigirSesion, repo }) {
          El nombre entre comillas y sin comillas dentro: si no, un nombre con
          comillas parte la cabecera. */
       const nombre = String(ficha.nombreOriginal || 'archivo').replace(/["\r\n]/g, '');
-      res.setHeader('Content-Disposition', `attachment; filename="${nombre}"`);
+      /* Las imágenes van `inline`. No es cosmético: una foto privada existe
+         para MIRARLA —la de quien viene al montaje se pone al lado de su cara
+         en la puerta—, y con `attachment` un `<img src>` no pinta nada. El
+         `nosniff` de abajo es lo que hace que servir algo en línea no sea un
+         riesgo: sin él, un archivo declarado imagen podría reinterpretarse. */
+      const enLinea = String(ficha.tipoMime || '').startsWith('image/');
+      res.setHeader('Content-Disposition', `${enLinea ? 'inline' : 'attachment'}; filename="${nombre}"`);
       res.setHeader('X-Content-Type-Options', 'nosniff');
       /* Un privado no se guarda en ninguna caché intermedia. */
       res.setHeader('Cache-Control', 'private, no-store');

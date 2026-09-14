@@ -16,6 +16,7 @@ const { crearServicio } = require('./servicio.js');
 const { crearRutas } = require('./rutas.js');
 const repositorio = require('./repositorio.js');
 const almacen = require('./almacen.js');
+const firmas = require('./firmas.js');
 const auth = require('../auth');
 const config = require('../../core/config');
 
@@ -32,4 +33,19 @@ const rutas = crearRutas({
 
 const urlDe = (ruta) => `${config.ARCHIVOS_URL_BASE}/${ruta}`;
 
-module.exports = { rutas, servicio, urlDe, comprobarAlmacen: almacen.comprobar };
+/* La URL con caducidad de un archivo PRIVADO, para quien tenga derecho a verlo.
+ *
+ * Sale por la puerta del módulo —y no firmando por libre desde otra ruta—
+ * porque el secreto y la vida del enlace son de aquí: dos sitios firmando es
+ * como acaban existiendo dos caducidades distintas para lo mismo.
+ *
+ * Quince minutos: lo que dura mirar una foto en la puerta, no lo que dura un
+ * enlace olvidado en un chat. */
+const enlaceFirmado = (ruta, opciones = {}) => {
+  if (!ruta) return null;
+  const { expira, firma } = firmas.firmarRuta(ruta, opciones);
+  const p = new URLSearchParams({ ruta, expira: String(expira), firma });
+  return `${config.ARCHIVOS_URL_BASE}/privado?${p.toString()}`;
+};
+
+module.exports = { rutas, servicio, urlDe, enlaceFirmado, comprobarAlmacen: almacen.comprobar };

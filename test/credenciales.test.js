@@ -229,3 +229,64 @@ test('la migración no enciende nada por su cuenta', () => {
   assert.match(m, /visible_publico boolean not null default true/);
   assert.match(m, /credencial_gen integer not null default 0/);
 });
+
+/* ── La sustitución del día del montaje (0128) ────────────────────────── */
+
+test('sustituir es transferir: la credencial del que no vino deja de abrir', () => {
+  /* Es la mitad que se olvida. Si sustituir sólo escribiera el nombre nuevo,
+     el QR del que se enfermó seguiría abriendo: dos credenciales buenas para
+     un puesto, que es peor que no haber acreditado a nadie. */
+  const puestos = require('../lib/puestos.js');
+  const previo = { id: 'p1', evento_id: 'e1', nombre: 'El que iba', credencial_gen: 0,
+                   autorizado_at: '2026-09-13T10:00:00Z', autorizado_por: 'La organización' };
+
+  const { puesto, rastro } = puestos.aplicarTransferencia({ puesto: previo, destino: { nombre: 'El primo' } });
+
+  assert.equal(puesto.credencial_gen, 1, 'sin subir la generación, el QR del otro sigue valiendo');
+  assert.equal(c.credencialAlDia({ genDelToken: 0, puesto }), false);
+  /* Y no hereda la autorización: por el primo hay que responder otra vez. */
+  assert.equal(puesto.autorizado_at, null);
+  /* El rastro dice a quién sustituyó, que es lo que se pregunta después. */
+  assert.equal(rastro.de_nombre, 'El que iba');
+  assert.equal(rastro.a_nombre, 'El primo');
+});
+
+test('la sustitución en el momento está apagada mientras nadie la encienda', () => {
+  /* `autoriza` nace en 'evento': aplicar la 0128 no le da a ningún stand el
+     poder de acreditar a quien quiera. */
+  const m = leer('db/migrations/0128_el_que_iba_se_enfermo.sql');
+  assert.match(m, /autoriza text not null default 'evento'/);
+  assert.match(m, /check \(autoriza in \('evento', 'responsable'\)\)/);
+});
+
+/* ── La foto ──────────────────────────────────────────────────────────── */
+
+test('una ruta privada sin firmador no sale en la respuesta', () => {
+  /* Media filtración es una filtración: si quien pregunta no puede ver fotos,
+     lo que no puede recibir es la ruta donde está. */
+  assert.equal(c.fotoParaVer('acreditacion/2026/ab12.jpg', null), null);
+});
+
+test('la ruta privada se firma, y una URL de fuera se deja como está', () => {
+  const firmada = c.fotoParaVer('acreditacion/2026/ab12.jpg', (r) => `https://x/privado?ruta=${r}`);
+  assert.match(firmada, /privado\?ruta=acreditacion/);
+  assert.equal(c.fotoParaVer('https://cdn.ajeno/foto.jpg', () => 'no'), 'https://cdn.ajeno/foto.jpg');
+});
+
+test('la foto de acreditación vive en una carpeta privada y sin sesión', () => {
+  /* Privada porque es la cara de un trabajador junto a su documento. Sin sesión
+     porque la sube la cuadrilla desde el enlace del stand, y pedirle cuenta a
+     esa gente es garantizar que no suba nadie ninguna. */
+  const tipos = leer('modules/archivos/tipos.js');
+  const bloque = tipos.slice(tipos.indexOf("'acreditacion'"), tipos.indexOf("'hojas-de-vida'"));
+  assert.match(bloque, /publico:\s*false/);
+  assert.match(bloque, /exigeSesion:\s*false/);
+});
+
+test('una imagen privada se sirve para verla, no para descargarla', () => {
+  /* Con `attachment`, un `<img src>` no pinta nada — y la foto existe para
+     ponerla al lado de la cara en la puerta. */
+  const rutas = leer('modules/archivos/rutas.js');
+  assert.match(rutas, /enLinea \? 'inline' : 'attachment'/);
+  assert.match(rutas, /X-Content-Type-Options/, 'servir en línea sin nosniff sí sería un riesgo');
+});
