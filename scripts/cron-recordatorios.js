@@ -25,6 +25,7 @@ require('dotenv').config();
 
 const { correrCicloRecordatorios } = require('../lib/recordatorios.js');
 const { barrerOauth } = require('../lib/oauthBarrido.js');
+const { correrResumenDeAcreditacion } = require('../lib/resumenDeAcreditacion.js');
 
 const inicio = Date.now();
 
@@ -42,6 +43,19 @@ correrCicloRecordatorios()
       await barrerOauth();
     } catch (e) {
       console.error(`[cron] recordatorios: el barrido de OAuth falló — ${e.message}`);
+    }
+
+    /* El resumen de acreditación (0127): «mañana entran 34 y te faltan 6 por
+       autorizar», la víspera de que la credencial empiece a abrir.
+       Va aquí y no en un cron propio porque es una entrada más en cPanel que
+       alguien tendría que acordarse de poner —y el ciclo que ya corre cada
+       quince minutos es exactamente el que hace falta—. En su propio `try` por
+       lo mismo que el barrido: los recordatorios son lo que la gente nota. */
+    try {
+      const r = await correrResumenDeAcreditacion();
+      if (r.avisados) console.log(`[cron] acreditación: ${r.avisados} resúmenes enviados.`);
+    } catch (e) {
+      console.error(`[cron] recordatorios: el resumen de acreditación falló — ${e.message}`);
     }
     console.log(`[cron] recordatorios: ciclo completo en ${Date.now() - inicio} ms — ${new Date().toISOString()}`);
     process.exit(0);

@@ -394,3 +394,74 @@ test('cerrar la jornada anota salidas a mano, no las inventa como escaneos', () 
   assert.match(bloque, /operador_id: req\.user\.id/);
   assert.match(bloque, /jornada_cerrada/, 'un cierre en masa tiene que quedar en auditoría');
 });
+
+/* ── El resumen de la víspera ─────────────────────────────────────────── */
+
+const resumen = require('../lib/resumenDeAcreditacion.js');
+
+const HORA_MS = 3600 * 1000;
+const AHORA = new Date('2026-09-13T20:00:00Z').getTime();
+const enHoras = (h) => new Date(AHORA + h * HORA_MS).toISOString();
+
+test('el resumen sale la víspera de que la credencial empiece a abrir', () => {
+  /* No la víspera del EVENTO: el montaje empieza dos días antes, y avisar la
+     víspera del evento sería avisar cuando ya pasó. */
+  const tipos = [
+    { id: 'a', vigencia_desde: enHoras(18) },   // mañana por la mañana → toca
+    { id: 'b', vigencia_desde: enHoras(72) },   // dentro de tres días → todavía no
+    { id: 'c', vigencia_desde: enHoras(2) },    // en dos horas → ya es tarde para esto
+    { id: 'd', vigencia_desde: enHoras(-5) },   // ya abrió
+    { id: 'e', vigencia_desde: null },          // una boleta normal
+  ];
+  const tocan = resumen.aQuienTocaResumen(tipos, AHORA).map(t => t.id);
+  assert.deepEqual(tocan, ['a']);
+});
+
+test('la ventana es ancha a propósito', () => {
+  /* El cron corre cada quince minutos y en cPanel la aplicación puede estar
+     dormida. Con una ventana estrecha, una vuelta perdida se lleva el aviso
+     entero; como sólo se manda uno por evento, sobrarle horas no cuesta nada. */
+  assert.ok(resumen.DESDE_H - resumen.HASTA_H >= 6,
+    'una ventana corta convierte un fallo de una vuelta en un aviso perdido');
+
+  const justoAlEntrar = resumen.aQuienTocaResumen([{ id: 'x', vigencia_desde: enHoras(23.5) }], AHORA);
+  const justoAlSalir  = resumen.aQuienTocaResumen([{ id: 'x', vigencia_desde: enHoras(12.5) }], AHORA);
+  assert.equal(justoAlEntrar.length, 1);
+  assert.equal(justoAlSalir.length, 1);
+});
+
+test('una fecha ilegible no cuela', () => {
+  assert.deepEqual(resumen.aQuienTocaResumen([{ id: 'x', vigencia_desde: 'mañana' }], AHORA), []);
+  assert.deepEqual(resumen.aQuienTocaResumen(null, AHORA), []);
+});
+
+test('el resumen abre con lo que FALTA, no con lo que está hecho', () => {
+  /* «34 acreditados» se lee como una tarea terminada. «Te faltan 6» es lo
+     único que hace que alguien abra la pantalla esa noche. */
+  const { titulo, cuerpo } = resumen.textoDelResumen({
+    pendientes: 6, total: 34, nombreDelTipo: 'Montaje', cuando: '2026-09-14T06:00:00Z',
+  });
+  assert.match(titulo, /faltan 6/);
+  assert.match(cuerpo, /34/);
+  assert.match(cuerpo, /Montaje/);
+  assert.match(cuerpo, /no entran/, 'la consecuencia, dicha: es lo que mueve a alguien');
+});
+
+test('el resumen va enganchado al cron que ya corre, y no se lleva los demás por delante', () => {
+  /* Un cron propio es una entrada más en cPanel que alguien tendría que
+     acordarse de poner — y el ciclo de quince minutos que ya existe es
+     exactamente el que hace falta. Su propio `try` porque los recordatorios de
+     los eventos son lo que la gente nota si falla. */
+  const cron = leer('scripts/cron-recordatorios.js');
+  assert.match(cron, /correrResumenDeAcreditacion/);
+  const bloque = cron.slice(cron.indexOf('correrResumenDeAcreditacion()'));
+  assert.match(bloque.slice(0, 400), /catch/);
+});
+
+test('el resumen no comparte marca con el aviso de inscripción', () => {
+  /* Son dos cosas distintas: el «un aviso vivo a la vez» de uno no puede
+     callar al otro, o el resumen de la víspera no saldría nunca en un evento
+     donde alguien dejó un aviso sin leer. */
+  const avisoInscripcion = require('../lib/avisoDeAcreditacion.js');
+  assert.notEqual(resumen.TIPO_RESUMEN, avisoInscripcion.TIPO);
+});
