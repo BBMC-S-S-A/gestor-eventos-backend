@@ -112,7 +112,7 @@ const mesaDeCuatro = () => ({
   ticket_puestos: [1, 2, 3, 4].map(n => ({
     id: `p${n}`, ticket_id: 't1', evento_id: 'e1', orden: n,
     nombre: `Persona ${n}`, email: null, estado: 'asignado',
-    qr_token: `token-p${n}`, usado_at: null,
+    qr_token: `token-p${n}`, credencial_gen: 0, usado_at: null,
   })),
   tickets: [{ ...TICKET, estado: 'pagado', checked_in_at: null }],
 });
@@ -177,14 +177,16 @@ test('un token rotado por una transferencia ya NO abre la puerta', async () => {
   const sim = baseSimulada(mesaDeCuatro());
   const puerta = cargarPuerta(sim);
 
-  /* Se transfiere el puesto 3: la base guarda un token nuevo. */
+  /* Se transfiere el puesto 3: sube la GENERACIÓN de su credencial (0127) y se
+     firma un token nuevo con ella. */
   sim.datos.ticket_puestos[2].qr_token = 'token-p3-NUEVO';
+  sim.datos.ticket_puestos[2].credencial_gen = 1;
   sim.datos.ticket_puestos[2].nombre = 'Quien lo compró';
 
   /* Quien lo vendió se quedó con el QR viejo. Su firma sigue siendo nuestra y
      perfectamente válida — por eso comprobar la firma no bastaba. */
   const viejo = await puerta.consumirPuesto({
-    ticket: TICKET, puestoIdDelQr: 'p3', token: 'token-p3', at: AHORA,
+    ticket: TICKET, puestoIdDelQr: 'p3', token: 'token-p3', gen: 0, at: AHORA,
   });
   assert.equal(viejo.ok, false, 'el QR del vendedor abrió la puerta');
   assert.equal(viejo.motivo, 'rotado');
@@ -193,9 +195,46 @@ test('un token rotado por una transferencia ya NO abre la puerta', async () => {
 
   /* Y el nuevo sí entra. */
   const nuevo = await puerta.consumirPuesto({
-    ticket: TICKET, puestoIdDelQr: 'p3', token: 'token-p3-NUEVO', at: AHORA,
+    ticket: TICKET, puestoIdDelQr: 'p3', token: 'token-p3-NUEVO', gen: 1, at: AHORA,
   });
   assert.equal(nuevo.ok, true, 'quien compró el puesto no pudo entrar');
+});
+
+test('pero el QR de un REENVÍO sigue abriendo, que no es lo mismo', async () => {
+  /* Lo que se rompía antes de la 0127.
+   *
+   * El correo con la boleta se pierde y la persona pide que se lo manden otra
+   * vez. Cada envío firma un token nuevo del MISMO puesto: nadie transfirió
+   * nada, no hay segundo titular, no hay reventa. Con la comparación contra el
+   * token guardado, quien llegaba con el correo del primer envío —o con la
+   * escarapela ya impresa— se encontraba la puerta cerrada y, encima, un
+   * mensaje que decía «se transfirió», que era mentira.
+   *
+   * Lo que separa las dos cosas es la generación: reenviar no la mueve. */
+  const sim = baseSimulada(mesaDeCuatro());
+  const puerta = cargarPuerta(sim);
+
+  /* Se reenvía el correo del puesto 2: token nuevo, MISMA generación. */
+  sim.datos.ticket_puestos[1].qr_token = 'token-p2-REENVIADO';
+
+  const conElViejo = await puerta.consumirPuesto({
+    ticket: TICKET, puestoIdDelQr: 'p2', token: 'token-p2', gen: 0, at: AHORA,
+  });
+  assert.equal(conElViejo.ok, true, 'el QR del primer correo dejó de abrir');
+  assert.equal(sim.datos.ticket_puestos[1].estado, 'usado');
+});
+
+test('y los QR de antes de la 0127, que no llevan generación, abren igual', async () => {
+  /* No hay que reemitir nada: un QR sin `g` es la generación 0, y 0 es lo que
+     tienen todos los puestos que ya existían. Si esto fallara, aplicar la
+     migración dejaría fuera a todo el que ya tiene su boleta. */
+  const sim = baseSimulada(mesaDeCuatro());
+  const puerta = cargarPuerta(sim);
+
+  const r = await puerta.consumirPuesto({
+    ticket: TICKET, puestoIdDelQr: 'p1', token: 'token-p1', at: AHORA,  // sin `gen`
+  });
+  assert.equal(r.ok, true, 'un QR de antes de la 0127 dejó de abrir');
 });
 
 test('un puesto a medio transferir no abre, pero tampoco se pierde', async () => {
@@ -274,20 +313,24 @@ test('sin la 0118 aplicada, el check-in sigue funcionando', async () => {
 
 /* ── La cerradura ────────────────────────────────────────────────────── */
 
-test('marcar un puesto compara el token DENTRO del update, no antes', async () => {
+test('marcar un puesto compara la generación DENTRO del update, no antes', async () => {
   /* Entre leer el puesto y escribirlo cabe una transferencia. Si la
      comparación viviera sólo en la lectura, ese hueco dejaría entrar a quien
-     acaba de dejar de ser el titular. Por eso `eq('qr_token', …)` viaja en el
-     propio update, junto al `neq('estado','usado')` que impide el doble
-     escaneo desde dos puertas a la vez. */
+     acaba de dejar de ser el titular. Por eso `eq('credencial_gen', …)` viaja
+     en el propio update, junto al `neq('estado','usado')` que impide el doble
+     escaneo desde dos puertas a la vez.
+
+     Era `eq('qr_token', …)` hasta la 0127, y cerraba el mismo hueco: lo que
+     cambió es que el token también se mueve al reenviar un correo, y la
+     generación sólo al transferir. */
   const sim = baseSimulada(mesaDeCuatro());
   const puerta = cargarPuerta(sim);
 
-  await puerta.marcarPuestoUsado({ puesto: { id: 'p1' }, token: 'token-p1', at: AHORA });
+  await puerta.marcarPuestoUsado({ puesto: { id: 'p1' }, gen: 0, at: AHORA });
 
   const escritura = sim.escrituras.find(e => e.tabla === 'ticket_puestos');
   const tipos = escritura.filtros.map(f => `${f[0]}:${f[1]}`);
-  assert.ok(tipos.includes('eq:qr_token'), 'el update no compara el token');
+  assert.ok(tipos.includes('eq:credencial_gen'), 'el update no compara la generación');
   assert.ok(tipos.includes('neq:estado'), 'el update no lleva la cerradura del doble escaneo');
 });
 

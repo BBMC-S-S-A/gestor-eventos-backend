@@ -87,6 +87,12 @@ const CATALOGO = [
   { id: 'gestionar_clientes',    grupo: 'Clientes',  label: 'Editar clientes' },
   { id: 'checkin',               grupo: 'Clientes',  label: 'Hacer check-in' },
   { id: 'vip_zone',              grupo: 'Clientes',  label: 'Atender cualquier puerta' },
+  /* Repartir lo que la boleta incluye: el almuerzo, el kit, el parqueadero
+     (0126). Va aparte de `checkin` a propósito: quien sirve la comida no tiene
+     por qué poder abrir la puerta del evento, y quien está en la puerta no
+     tiene por qué poder repartir el almuerzo. Son dos personas distintas y a
+     menudo dos empresas distintas. */
+  { id: 'entregar',              grupo: 'Clientes',  label: 'Entregar lo que incluye la boleta' },
   /* BORRAR una boleta, que no es lo mismo que anularla.
    *
    * Anular deja la fila: la persona sigue en la lista, marcada como inválida, y

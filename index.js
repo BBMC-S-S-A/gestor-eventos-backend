@@ -138,6 +138,10 @@ app.use('/categorias',       require('./routes/categorias.js'));
 /* Panel del expositor (público, auth por código de su boleta-Stand). Antes de
    eventos.publicos para que /expositor/:codigo/* tenga prioridad. */
 app.use('/eventos/publicos/expositor', require('./routes/expositor.js'));
+/* El enlace del anfitrión (0118/0127): quien tiene el código de una boleta
+   pone los nombres de quienes entran con ella —la mesa de cuatro, la cuadrilla
+   de montaje—. Sin sesión a propósito: esa gente no tiene cuenta. */
+app.use('/acreditar',        require('./routes/acreditados.js').publico);
 /* Portal del capitán de un equipo de torneo. Mismo caso y mismo sitio que el
    del expositor: alguien sin cuenta que edita UNA ficha, identificado por el
    código de su boleta. Va antes de eventos.publicos por lo mismo. */
@@ -192,6 +196,8 @@ app.use('/eventos',          require('./routes/roles.js'));
 app.use('/eventos',          require('./routes/tickets.js'));
 app.use('/eventos',          require('./routes/espacios.js'));
 app.use('/eventos',          require('./routes/clientes.js'));
+app.use('/eventos',          require('./routes/derechos.js'));
+app.use('/eventos',          require('./routes/acreditados.js').panel);
 app.use('/eventos',          require('./routes/chat.js'));
 app.use('/eventos',          require('./routes/agenda.js'));
 app.use('/eventos',          require('./routes/sesiones.js').panel);

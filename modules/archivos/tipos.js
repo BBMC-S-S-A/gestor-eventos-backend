@@ -99,6 +99,22 @@ const CARPETAS = {
     publico: true,
     exigeSesion: false,
   },
+  /* La foto de quien viene al montaje (0127).
+   *
+   * Privada, y no por prudencia genérica: es la cara de un trabajador de un
+   * tercero junto a su documento, y eso es dato personal con finalidad y plazo.
+   * Una carpeta pública tendría la foto en una URL adivinable para siempre.
+   *
+   * Y sin sesión, porque quien la sube es la cuadrilla desde el enlace del
+   * stand y esa gente no tiene cuenta — pedirle una es garantizar que nadie
+   * suba ninguna. Lo que la protege es que se lee sólo con un enlace firmado y
+   * de quince minutos. */
+  'acreditacion': {
+    mimes  : ['image/jpeg', 'image/png', 'image/webp'],
+    maxBytes: 4 * 1024 * 1024,
+    publico: false,
+    exigeSesion: false,
+  },
   'hojas-de-vida': {
     mimes  : ['application/pdf', 'application/zip'],
     maxBytes: 8 * 1024 * 1024,
