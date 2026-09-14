@@ -108,6 +108,23 @@ y a quién preguntar. Los tres motivos posibles:
 
 ---
 
+## Quién sigue dentro
+
+En *Asistentes → Quién entra*, arriba, aparece **quién entró y no ha marcado
+salida** — y sólo aparece cuando hay alguien. A las ocho de la noche, con el
+galpón lleno de herramienta, ésa es la pregunta útil: no a quién se dejó
+entrar, sino quién no ha salido.
+
+**Cerrar jornada** marca la salida de todos los que quedan. Hace falta porque
+la gente no escanea al salir: entrar abre una puerta y salir no tiene premio,
+así que sin el cierre la lista dice que hay treinta personas en un galpón
+vacío. Un dato que miente así es peor que no tenerlo — la primera vez que
+alguien lo comprueba y no cuadra, deja de mirarlo para siempre.
+
+Las salidas del cierre quedan marcadas como hechas a mano y con quién las
+cerró, para que el histórico distinga «salió y se escaneó» de «se dio por
+cerrado».
+
 ## Avisos
 
 Cuando alguien se inscribe y queda pendiente, se avisa a quien tiene permiso
@@ -127,9 +144,6 @@ Por eso el aviso dice «al menos N»: la cifra exacta está en la pantalla.
 - **Registrar la herramienta que entra y sale.** Es lo que más miedo da y lo
   que peor se sostiene: exige inventario por stand y alguien contando cajas.
   Primero conviene rodar quién entra y quién responde.
-- **Salida obligatoria al cerrar la jornada.** El vaivén ya existe
-  (*Reingreso*), pero nada obliga a usarlo. Con eso, a las ocho de la noche
-  habría una lista de quién sigue dentro.
 
 ## Datos personales
 

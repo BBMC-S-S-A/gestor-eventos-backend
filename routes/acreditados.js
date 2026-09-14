@@ -39,7 +39,7 @@ const { auditar } = require('../lib/auditar.js');
 const { signPuestoQR } = require('../lib/qr.js');
 const puestos = require('../lib/puestos.js');
 const archivos = require('../modules/archivos');
-const { fotoParaVer } = require('../lib/credenciales.js');
+const { fotoParaVer, quienSigueDentro } = require('../lib/credenciales.js');
 const { avisarAcreditacionPendiente } = require('../lib/avisoDeAcreditacion.js');
 
 const COLS = `id, ticket_id, evento_id, orden, nombre, email, documento, telefono, foto_url,
@@ -491,6 +491,132 @@ panel.post('/:eventoId/acreditados/:puestoId/revocar', exige(PERMS), async (req,
       detalle: { nombre: data.nombre, motivo: req.body?.motivo || null },
     });
     res.json({ acreditado: verPuesto(data) });
+  } catch (e) {
+    res.status(e.message === 'No autorizado.' ? 403 : 400).json({ error: e.message });
+  }
+});
+
+/* ══════════════ 3 · Quién sigue dentro ══════════════
+ *
+ * A las ocho de la noche, con el galpón lleno de herramienta, la pregunta útil
+ * no es a quién se dejó entrar: es **quién no ha salido**. El vaivén ya se
+ * lleva por persona (0125); lo que faltaba era leerlo y poder cerrarlo.
+ */
+
+/* Los puestos acreditados de este evento — los de boletas que exigen
+   autorización. Se acota a ésos a propósito: «quién sigue dentro» de un evento
+   de 2.000 asistentes es el aforo, que ya existe y tiene su pantalla. Esto es
+   la cuadrilla, que son decenas. */
+async function puestosAcreditados(eventoId) {
+  const { data: tipos } = await supabase
+    .from('ticket_types').select('id')
+    .eq('evento_id', eventoId).eq('requiere_autorizacion', true);
+  const ids = (tipos || []).map(t => t.id);
+  if (!ids.length) return [];
+
+  const { data: boletas } = await supabase
+    .from('tickets').select('id, codigo').eq('evento_id', eventoId).in('ticket_type_id', ids);
+  const porBoleta = new Map((boletas || []).map(b => [b.id, b.codigo]));
+  if (!porBoleta.size) return [];
+
+  const { data: puestosFilas, error } = await supabase
+    .from('ticket_puestos').select(COLS)
+    .in('ticket_id', [...porBoleta.keys()])
+    .not('nombre', 'is', null);
+  if (error) throw new Error(error.message);
+
+  return (puestosFilas || []).map(p => ({ ...p, boleta: porBoleta.get(p.ticket_id) || null }));
+}
+
+/* GET /eventos/:eventoId/acreditados/dentro */
+panel.get('/:eventoId/acreditados/dentro', exige(PERMS), async (req, res) => {
+  const { eventoId } = req.params;
+  try {
+    await assertPermiso(eventoId, req.user.id, PERMS, 'id, owner_id');
+    const gente = await puestosAcreditados(eventoId);
+    if (!gente.length) return res.json({ dentro: [] });
+
+    /* Los movimientos de ESTAS personas, del más nuevo al más viejo. El tope
+       existe para que un evento de tres días no traiga el histórico entero a
+       memoria; con decenas de personas, mil movimientos son de sobra para que
+       el último de cada una esté dentro. */
+    const { data: movs, error } = await supabase
+      .from('ticket_movimientos')
+      .select('puesto_id, tipo, created_at')
+      .eq('evento_id', eventoId)
+      .in('puesto_id', gente.map(p => p.id))
+      .order('created_at', { ascending: false })
+      .limit(1000);
+    if (error) return res.status(500).json({ error: error.message });
+
+    const dentro = quienSigueDentro(movs || []);
+    res.json({
+      dentro: gente
+        .filter(p => dentro.has(p.id))
+        .map(p => ({ ...verPuesto(p), boleta: p.boleta, desde: dentro.get(p.id) })),
+    });
+  } catch (e) {
+    res.status(e.message === 'No autorizado.' ? 403 : 400).json({ error: e.message });
+  }
+});
+
+/* POST /eventos/:eventoId/acreditados/cerrar-jornada
+ *
+ * Marca la salida de todo el que siga dentro.
+ *
+ * Hace falta porque **la gente no escanea al salir**. Entrar tiene premio —la
+ * puerta se abre— y salir no tiene ninguno, así que a las ocho de la noche la
+ * lista dice que hay treinta personas dentro de un galpón vacío. Un dato que
+ * miente así es peor que no tenerlo: la primera vez que alguien lo comprueba y
+ * no cuadra, deja de mirarlo para siempre.
+ *
+ * Las salidas se anotan con `origen: 'manual'` y con quién las cerró, para que
+ * el histórico distinga entre «salió y se escaneó» y «se dio por cerrado». La
+ * diferencia importa el día que haya que reconstruir a qué hora se fue alguien.
+ */
+panel.post('/:eventoId/acreditados/cerrar-jornada', exige(PERMS), async (req, res) => {
+  const { eventoId } = req.params;
+  try {
+    await assertPermiso(eventoId, req.user.id, PERMS, 'id, owner_id');
+    const gente = await puestosAcreditados(eventoId);
+    if (!gente.length) return res.json({ cerrados: 0 });
+
+    const { data: movs } = await supabase
+      .from('ticket_movimientos')
+      .select('puesto_id, tipo, created_at')
+      .eq('evento_id', eventoId)
+      .in('puesto_id', gente.map(p => p.id))
+      .order('created_at', { ascending: false })
+      .limit(1000);
+
+    const dentro = quienSigueDentro(movs || []);
+    const aCerrar = gente.filter(p => dentro.has(p.id));
+    if (!aCerrar.length) return res.json({ cerrados: 0 });
+
+    const ahora = new Date().toISOString();
+    const nota = String(req.body?.nota || 'Cierre de jornada').slice(0, 200);
+    const filas = aCerrar.map(p => ({
+      ticket_id: p.ticket_id, evento_id: eventoId, puesto_id: p.id,
+      tipo: 'salida', cantidad: 1, origen: 'manual',
+      operador_id: req.user.id, nota, created_at: ahora,
+    }));
+
+    let { error } = await supabase.from('ticket_movimientos').insert(filas);
+    /* Sin la 0125 no hay `puesto_id`, y entonces esto no puede hacer su
+       trabajo: cerrar por boleta marcaría salir a la mesa entera. Se dice, en
+       vez de escribir movimientos que no significan lo que parece. */
+    if (error && /puesto_id/.test(error.message || '')) {
+      return res.status(409).json({
+        error: 'Falta aplicar la migración 0125: sin ella el vaivén no sabe de quién es y no se puede cerrar por persona.',
+      });
+    }
+    if (error) return res.status(500).json({ error: error.message });
+
+    await auditar(req, eventoId, 'jornada_cerrada', {
+      entidad: 'evento', entidadId: eventoId,
+      detalle: { cerrados: aCerrar.length, nombres: aCerrar.map(p => p.nombre).slice(0, 20), nota },
+    });
+    res.json({ cerrados: aCerrar.length });
   } catch (e) {
     res.status(e.message === 'No autorizado.' ? 403 : 400).json({ error: e.message });
   }

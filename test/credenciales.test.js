@@ -343,3 +343,54 @@ test('avisar nunca tumba la inscripción de un montajista', () => {
     assert.equal(r.motivo, 'sin_evento');
   });
 });
+
+/* ── Quién sigue dentro ───────────────────────────────────────────────── */
+
+test('sigue dentro quien tiene una entrada como último movimiento', () => {
+  /* Los movimientos llegan del más nuevo al más viejo, así que de cada persona
+     manda el primero que se ve. Al revés —quedarse con el último— daría el
+     primer movimiento del día, que siempre es una entrada: todo el mundo
+     aparecería dentro para siempre. */
+  const movs = [
+    { puesto_id: 'p1', tipo: 'salida',  created_at: '2026-09-14T19:00:00Z' },
+    { puesto_id: 'p2', tipo: 'entrada', created_at: '2026-09-14T18:00:00Z' },
+    { puesto_id: 'p1', tipo: 'entrada', created_at: '2026-09-14T07:00:00Z' },
+    { puesto_id: 'p2', tipo: 'salida',  created_at: '2026-09-14T13:00:00Z' },
+    { puesto_id: 'p2', tipo: 'entrada', created_at: '2026-09-14T07:10:00Z' },
+  ];
+  const dentro = c.quienSigueDentro(movs);
+
+  assert.equal(dentro.has('p1'), false, 'p1 salió a las 19:00');
+  assert.equal(dentro.has('p2'), true, 'p2 volvió a entrar a las 18:00');
+  assert.equal(dentro.get('p2'), '2026-09-14T18:00:00Z', 'y desde cuándo está');
+});
+
+test('quien nunca entró no está dentro, y un movimiento sin persona se ignora', () => {
+  /* Los movimientos de antes de la 0125 no llevan `puesto_id`. Contarlos como
+     de alguien sería inventarse quién está en el galpón. */
+  const dentro = c.quienSigueDentro([
+    { puesto_id: null, tipo: 'entrada', created_at: '2026-09-14T07:00:00Z' },
+    { tipo: 'entrada', created_at: '2026-09-14T07:00:00Z' },
+  ]);
+  assert.equal(dentro.size, 0);
+});
+
+test('sin movimientos no hay nadie dentro', () => {
+  assert.equal(c.quienSigueDentro([]).size, 0);
+  assert.equal(c.quienSigueDentro().size, 0);
+});
+
+test('cerrar la jornada anota salidas a mano, no las inventa como escaneos', () => {
+  /* La gente no escanea al salir: entrar tiene premio y salir no. Sin el
+     cierre, a las ocho la lista dice que hay treinta personas en un galpón
+     vacío — y la primera vez que alguien lo comprueba, deja de mirar esa lista
+     para siempre.
+     Se marca `manual` para que el histórico distinga «salió y se escaneó» de
+     «se dio por cerrado». */
+  const ruta = leer('routes/acreditados.js');
+  const bloque = ruta.slice(ruta.indexOf('cerrar-jornada'));
+  assert.match(bloque, /tipo: 'salida'/);
+  assert.match(bloque, /origen: 'manual'/);
+  assert.match(bloque, /operador_id: req\.user\.id/);
+  assert.match(bloque, /jornada_cerrada/, 'un cierre en masa tiene que quedar en auditoría');
+});
