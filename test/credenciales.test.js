@@ -290,3 +290,56 @@ test('una imagen privada se sirve para verla, no para descargarla', () => {
   assert.match(rutas, /enLinea \? 'inline' : 'attachment'/);
   assert.match(rutas, /X-Content-Type-Options/, 'servir en línea sin nosniff sí sería un riesgo');
 });
+
+/* ── Que alguien se entere (el aviso de acreditación) ─────────────────── */
+
+const aviso = require('../lib/avisoDeAcreditacion.js');
+
+test('un aviso sin leer bloquea el siguiente: la campana no se convierte en ruido', () => {
+  /* Un stand con seis montajistas son seis avisos, y cuarenta stands
+     doscientos cuarenta. Eso no es avisar: es enseñar a silenciar la campana,
+     y a partir de ahí no llega nada. */
+  assert.equal(aviso.hayAvisoVivo([{ tipo: 'acreditacion', leida: false }]), true);
+  assert.equal(aviso.hayAvisoVivo([{ tipo: 'acreditacion', leida: true }]), false,
+    'una vez leído, el siguiente registro vuelve a avisar');
+  assert.equal(aviso.hayAvisoVivo([{ tipo: 'alerta', leida: false }]), false,
+    'el aviso de otra cosa no puede tapar éste');
+  assert.equal(aviso.hayAvisoVivo([]), false);
+});
+
+test('el cuerpo dice quién y cuántos, y no promete una cifra exacta', () => {
+  /* Mientras el aviso siga sin leer no se manda otro, así que el número
+     envejece. «Al menos» es la única forma honesta de decirlo; el exacto está
+     en la pantalla a la que lleva. */
+  const uno = aviso.cuerpoDelAviso({ pendientes: 1, nombre: 'Ana Pérez', codigo: 'ST14' });
+  assert.match(uno, /Ana Pérez/);
+  assert.match(uno, /ST14/);
+  assert.doesNotMatch(uno, /al menos/i, 'con una sola no hay nada que estimar');
+
+  const varios = aviso.cuerpoDelAviso({ pendientes: 7, nombre: 'Ana Pérez' });
+  assert.match(varios, /Al menos 7/);
+
+  /* Y sin nombre sigue diciendo algo útil: pasa cuando el aviso lo dispara una
+     sustitución de alguien a quien todavía no se le puso nombre. */
+  assert.match(aviso.cuerpoDelAviso({ pendientes: 3 }), /Al menos 3/);
+});
+
+test('el aviso lleva a la pantalla que esa persona puede abrir', () => {
+  /* Se avisa con los mismos permisos que abren «Quién entra»: un aviso que
+     lleva a una puerta cerrada es peor que no avisar, porque además hace
+     pensar que el sistema está roto. */
+  const src = leer('lib/avisoDeAcreditacion.js');
+  assert.match(src, /s=asistentes&t=acreditados/);
+  for (const p of ['gestionar_acreditacion', 'checkin', 'editar_evento']) {
+    assert.ok(aviso.AVISADOS.includes(p), `falta ${p} entre quienes reciben el aviso`);
+  }
+});
+
+test('avisar nunca tumba la inscripción de un montajista', () => {
+  /* Sin evento no hay nada que hacer, y lo dice en vez de reventar: esto corre
+     detrás de un formulario que ya se guardó. */
+  return aviso.avisarAcreditacionPendiente({ eventoId: null }).then(r => {
+    assert.equal(r.avisados, 0);
+    assert.equal(r.motivo, 'sin_evento');
+  });
+});

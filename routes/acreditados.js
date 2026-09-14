@@ -40,6 +40,7 @@ const { signPuestoQR } = require('../lib/qr.js');
 const puestos = require('../lib/puestos.js');
 const archivos = require('../modules/archivos');
 const { fotoParaVer } = require('../lib/credenciales.js');
+const { avisarAcreditacionPendiente } = require('../lib/avisoDeAcreditacion.js');
 
 const COLS = `id, ticket_id, evento_id, orden, nombre, email, documento, telefono, foto_url,
               estado, autorizado_at, autorizado_por, credencial_gen, usado_at`;
@@ -181,6 +182,21 @@ publico.patch('/:codigo/puestos/:puestoId', cargarBoleta, async (req, res) => {
       detalle: { boleta: req.boleta.codigo, nombre: data.nombre, documento: Boolean(data.documento) },
     });
 
+    /* Y que alguien se entere.
+     *
+     * Sin esto, quien organiza tendría que acordarse de entrar a mirar «Quién
+     * entra», y no lo va a hacer: la semana antes de un evento hay cuarenta
+     * cosas encima. El final de esa historia es la cuadrilla a las seis de la
+     * mañana, registrada y sin autorizar.
+     *
+     * Sin `await`: el aviso no puede hacer esperar a quien está llenando un
+     * formulario desde el móvil, y menos hacerlo fallar. */
+    if (req.boleta.tipo?.requiere_autorizacion && !data.autorizado_at) {
+      avisarAcreditacionPendiente({
+        eventoId: req.boleta.evento_id, nombre: data.nombre, codigo: req.boleta.codigo,
+      });
+    }
+
     res.json({ puesto: verPuesto(data) });
   } catch (e) {
     res.status(400).json({ error: e.message });
@@ -280,6 +296,14 @@ publico.post('/:codigo/puestos/:puestoId/sustituir', cargarBoleta, async (req, r
         autorizado_por_el_responsable: Boolean(cambios.autorizado_at),
       },
     });
+
+    /* Una sustitución que se queda esperando es la más urgente de todas: la
+       persona nueva suele estar ya en camino, o en la puerta. */
+    if (exigeAutorizacion && !cambios.autorizado_at) {
+      avisarAcreditacionPendiente({
+        eventoId: req.boleta.evento_id, nombre: data.nombre, codigo: req.boleta.codigo,
+      });
+    }
 
     res.json({
       puesto: verPuesto(data),
