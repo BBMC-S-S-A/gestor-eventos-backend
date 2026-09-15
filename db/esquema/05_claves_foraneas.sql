@@ -1,23 +1,3 @@
-/* ═══════════════════════════════════════════════════════════════════════════════
- * GESTEK · Volcado de la base de Supabase — 05 · CLAVES FORÁNEAS
- * ═══════════════════════════════════════════════════════════════════════════════
- *
- * Generado: 2026-09-04, corriendo db/esquema/generar-esquema.mjs contra Postgres
- *           (proyecto `GestorEventosMarcaBlanca`, yopontbwgdybfsniqawz).
- * Va al FINAL, después de tablas, datos e índices: hay ciclos entre tablas y
- * no existe un orden de creación que las respete todas. NO incluye las claves
- * que en Postgres apuntan a auth.users — quedan como CHAR(36) con índice; ver
- * NOTAS-ESQUEMA.md.
- *
- * Este archivo es la salida del generador. NO se edita a mano: si el esquema
- * de Postgres cambia, se vuelve a correr este script y se compara con
- * `git diff`. El «por qué» de cada traducción está en
- * `db/migraciones/NOTAS-ESQUEMA.md`; el orden de aplicación de los seis
- * archivos, en el README.md de esta carpeta.
- * ═══════════════════════════════════════════════════════════════════════════════ */
-
-SET NAMES utf8mb4;
-
 ALTER TABLE `agenda_favoritos` ADD CONSTRAINT `agenda_favoritos_evento_id_fkey` FOREIGN KEY (`evento_id`) REFERENCES `eventos` (`id`) ON DELETE CASCADE;
 ALTER TABLE `agenda_favoritos` ADD CONSTRAINT `agenda_favoritos_session_id_fkey` FOREIGN KEY (`session_id`) REFERENCES `agenda_sessions` (`id`) ON DELETE CASCADE;
 ALTER TABLE `agenda_sessions` ADD CONSTRAINT `agenda_sessions_evento_id_fkey` FOREIGN KEY (`evento_id`) REFERENCES `eventos` (`id`) ON DELETE CASCADE;
@@ -52,6 +32,11 @@ ALTER TABLE `discount_codes` ADD CONSTRAINT `discount_codes_evento_id_fkey` FORE
 ALTER TABLE `email_cola` ADD CONSTRAINT `email_cola_evento_id_fkey` FOREIGN KEY (`evento_id`) REFERENCES `eventos` (`id`) ON DELETE CASCADE;
 ALTER TABLE `email_log` ADD CONSTRAINT `email_log_evento_id_fkey` FOREIGN KEY (`evento_id`) REFERENCES `eventos` (`id`) ON DELETE CASCADE;
 ALTER TABLE `email_log` ADD CONSTRAINT `email_log_ticket_id_fkey` FOREIGN KEY (`ticket_id`) REFERENCES `tickets` (`id`) ON DELETE CASCADE;
+ALTER TABLE `espacio_reservas` ADD CONSTRAINT `espacio_reservas_espacio_id_fkey` FOREIGN KEY (`espacio_id`) REFERENCES `espacios` (`id`) ON DELETE CASCADE;
+ALTER TABLE `espacio_reservas` ADD CONSTRAINT `espacio_reservas_evento_id_fkey` FOREIGN KEY (`evento_id`) REFERENCES `eventos` (`id`) ON DELETE CASCADE;
+ALTER TABLE `espacio_reservas` ADD CONSTRAINT `espacio_reservas_ticket_id_fkey` FOREIGN KEY (`ticket_id`) REFERENCES `tickets` (`id`) ON DELETE SET NULL;
+ALTER TABLE `espacios` ADD CONSTRAINT `espacios_evento_id_fkey` FOREIGN KEY (`evento_id`) REFERENCES `eventos` (`id`) ON DELETE CASCADE;
+ALTER TABLE `espacios` ADD CONSTRAINT `espacios_parent_id_fkey` FOREIGN KEY (`parent_id`) REFERENCES `espacios` (`id`) ON DELETE CASCADE;
 ALTER TABLE `event_form_fields` ADD CONSTRAINT `event_form_fields_evento_id_fkey` FOREIGN KEY (`evento_id`) REFERENCES `eventos` (`id`) ON DELETE CASCADE;
 ALTER TABLE `event_form_fields` ADD CONSTRAINT `event_form_fields_session_id_fkey` FOREIGN KEY (`session_id`) REFERENCES `agenda_sessions` (`id`) ON DELETE CASCADE;
 ALTER TABLE `event_form_fields` ADD CONSTRAINT `event_form_fields_ticket_type_id_fkey` FOREIGN KEY (`ticket_type_id`) REFERENCES `ticket_types` (`id`) ON DELETE CASCADE;
@@ -108,6 +93,8 @@ ALTER TABLE `postulaciones` ADD CONSTRAINT `postulaciones_user_id_fkey` FOREIGN 
 ALTER TABLE `postulaciones` ADD CONSTRAINT `postulaciones_vacante_id_fkey` FOREIGN KEY (`vacante_id`) REFERENCES `vacantes` (`id`) ON DELETE CASCADE;
 ALTER TABLE `promociones` ADD CONSTRAINT `promociones_evento_id_fkey` FOREIGN KEY (`evento_id`) REFERENCES `eventos` (`id`) ON DELETE CASCADE;
 ALTER TABLE `promociones` ADD CONSTRAINT `promociones_ticket_id_fkey` FOREIGN KEY (`ticket_id`) REFERENCES `ticket_types` (`id`) ON DELETE SET NULL;
+ALTER TABLE `puesto_transferencias` ADD CONSTRAINT `puesto_transferencias_evento_id_fkey` FOREIGN KEY (`evento_id`) REFERENCES `eventos` (`id`) ON DELETE CASCADE;
+ALTER TABLE `puesto_transferencias` ADD CONSTRAINT `puesto_transferencias_puesto_id_fkey` FOREIGN KEY (`puesto_id`) REFERENCES `ticket_puestos` (`id`) ON DELETE CASCADE;
 ALTER TABLE `puntos_balance` ADD CONSTRAINT `puntos_balance_organizador_id_fkey` FOREIGN KEY (`organizador_id`) REFERENCES `profiles` (`id`) ON DELETE CASCADE;
 ALTER TABLE `puntos_balance` ADD CONSTRAINT `puntos_balance_user_id_fkey` FOREIGN KEY (`user_id`) REFERENCES `profiles` (`id`) ON DELETE CASCADE;
 ALTER TABLE `push_subscriptions` ADD CONSTRAINT `push_subscriptions_user_id_fkey` FOREIGN KEY (`user_id`) REFERENCES `profiles` (`id`) ON DELETE CASCADE;
@@ -140,6 +127,10 @@ ALTER TABLE `ticket_interacciones` ADD CONSTRAINT `ticket_interacciones_ticket_i
 ALTER TABLE `ticket_movimientos` ADD CONSTRAINT `ticket_movimientos_evento_id_fkey` FOREIGN KEY (`evento_id`) REFERENCES `eventos` (`id`) ON DELETE CASCADE;
 ALTER TABLE `ticket_movimientos` ADD CONSTRAINT `ticket_movimientos_operador_id_fkey` FOREIGN KEY (`operador_id`) REFERENCES `profiles` (`id`) ON DELETE SET NULL;
 ALTER TABLE `ticket_movimientos` ADD CONSTRAINT `ticket_movimientos_ticket_id_fkey` FOREIGN KEY (`ticket_id`) REFERENCES `tickets` (`id`) ON DELETE CASCADE;
+ALTER TABLE `ticket_puestos` ADD CONSTRAINT `ticket_puestos_evento_id_fkey` FOREIGN KEY (`evento_id`) REFERENCES `eventos` (`id`) ON DELETE CASCADE;
+ALTER TABLE `ticket_puestos` ADD CONSTRAINT `ticket_puestos_ticket_id_fkey` FOREIGN KEY (`ticket_id`) REFERENCES `tickets` (`id`) ON DELETE CASCADE;
+ALTER TABLE `ticket_type_espacios` ADD CONSTRAINT `ticket_type_espacios_espacio_id_fkey` FOREIGN KEY (`espacio_id`) REFERENCES `espacios` (`id`) ON DELETE CASCADE;
+ALTER TABLE `ticket_type_espacios` ADD CONSTRAINT `ticket_type_espacios_ticket_type_id_fkey` FOREIGN KEY (`ticket_type_id`) REFERENCES `ticket_types` (`id`) ON DELETE CASCADE;
 ALTER TABLE `ticket_types` ADD CONSTRAINT `ticket_types_crea_torneo_id_fkey` FOREIGN KEY (`crea_torneo_id`) REFERENCES `torneos` (`id`) ON DELETE SET NULL;
 ALTER TABLE `ticket_types` ADD CONSTRAINT `ticket_types_evento_id_fkey` FOREIGN KEY (`evento_id`) REFERENCES `eventos` (`id`) ON DELETE CASCADE;
 ALTER TABLE `tickets` ADD CONSTRAINT `tickets_discount_fk` FOREIGN KEY (`discount_code_id`) REFERENCES `discount_codes` (`id`) ON DELETE SET NULL;
@@ -147,14 +138,24 @@ ALTER TABLE `tickets` ADD CONSTRAINT `tickets_evento_id_fkey` FOREIGN KEY (`even
 ALTER TABLE `tickets` ADD CONSTRAINT `tickets_promocion_id_fkey` FOREIGN KEY (`promocion_id`) REFERENCES `promociones` (`id`) ON DELETE SET NULL;
 ALTER TABLE `tickets` ADD CONSTRAINT `tickets_ticket_type_id_fkey` FOREIGN KEY (`ticket_type_id`) REFERENCES `ticket_types` (`id`);
 ALTER TABLE `tickets` ADD CONSTRAINT `tickets_user_id_fkey` FOREIGN KEY (`user_id`) REFERENCES `profiles` (`id`);
+ALTER TABLE `torneo_calificaciones` ADD CONSTRAINT `torneo_calificaciones_criterio_id_fkey` FOREIGN KEY (`criterio_id`) REFERENCES `torneo_criterios` (`id`) ON DELETE CASCADE;
+ALTER TABLE `torneo_calificaciones` ADD CONSTRAINT `torneo_calificaciones_equipo_id_fkey` FOREIGN KEY (`equipo_id`) REFERENCES `torneo_equipos` (`id`) ON DELETE CASCADE;
+ALTER TABLE `torneo_calificaciones` ADD CONSTRAINT `torneo_calificaciones_jurado_id_fkey` FOREIGN KEY (`jurado_id`) REFERENCES `profiles` (`id`) ON DELETE CASCADE;
+ALTER TABLE `torneo_calificaciones` ADD CONSTRAINT `torneo_calificaciones_ronda_id_fkey` FOREIGN KEY (`ronda_id`) REFERENCES `torneo_rondas` (`id`) ON DELETE CASCADE;
 ALTER TABLE `torneo_categorias` ADD CONSTRAINT `torneo_categorias_evento_id_fkey` FOREIGN KEY (`evento_id`) REFERENCES `eventos` (`id`) ON DELETE CASCADE;
 ALTER TABLE `torneo_categorias` ADD CONSTRAINT `torneo_categorias_padre_id_fkey` FOREIGN KEY (`padre_id`) REFERENCES `torneo_categorias` (`id`) ON DELETE CASCADE;
+ALTER TABLE `torneo_criterios` ADD CONSTRAINT `torneo_criterios_torneo_id_fkey` FOREIGN KEY (`torneo_id`) REFERENCES `torneos` (`id`) ON DELETE CASCADE;
 ALTER TABLE `torneo_equipos` ADD CONSTRAINT `torneo_equipos_ticket_id_fkey` FOREIGN KEY (`ticket_id`) REFERENCES `tickets` (`id`) ON DELETE SET NULL;
 ALTER TABLE `torneo_equipos` ADD CONSTRAINT `torneo_equipos_torneo_id_fkey` FOREIGN KEY (`torneo_id`) REFERENCES `torneos` (`id`) ON DELETE CASCADE;
+ALTER TABLE `torneo_jurados` ADD CONSTRAINT `torneo_jurados_torneo_id_fkey` FOREIGN KEY (`torneo_id`) REFERENCES `torneos` (`id`) ON DELETE CASCADE;
+ALTER TABLE `torneo_jurados` ADD CONSTRAINT `torneo_jurados_user_id_fkey` FOREIGN KEY (`user_id`) REFERENCES `profiles` (`id`) ON DELETE CASCADE;
 ALTER TABLE `torneo_partidos` ADD CONSTRAINT `torneo_partidos_equipo_a_id_fkey` FOREIGN KEY (`equipo_a_id`) REFERENCES `torneo_equipos` (`id`) ON DELETE SET NULL;
 ALTER TABLE `torneo_partidos` ADD CONSTRAINT `torneo_partidos_equipo_b_id_fkey` FOREIGN KEY (`equipo_b_id`) REFERENCES `torneo_equipos` (`id`) ON DELETE SET NULL;
 ALTER TABLE `torneo_partidos` ADD CONSTRAINT `torneo_partidos_siguiente_partido_id_fkey` FOREIGN KEY (`siguiente_partido_id`) REFERENCES `torneo_partidos` (`id`) ON DELETE SET NULL;
 ALTER TABLE `torneo_partidos` ADD CONSTRAINT `torneo_partidos_torneo_id_fkey` FOREIGN KEY (`torneo_id`) REFERENCES `torneos` (`id`) ON DELETE CASCADE;
+ALTER TABLE `torneo_ronda_participantes` ADD CONSTRAINT `torneo_ronda_participantes_equipo_id_fkey` FOREIGN KEY (`equipo_id`) REFERENCES `torneo_equipos` (`id`) ON DELETE CASCADE;
+ALTER TABLE `torneo_ronda_participantes` ADD CONSTRAINT `torneo_ronda_participantes_ronda_id_fkey` FOREIGN KEY (`ronda_id`) REFERENCES `torneo_rondas` (`id`) ON DELETE CASCADE;
+ALTER TABLE `torneo_rondas` ADD CONSTRAINT `torneo_rondas_torneo_id_fkey` FOREIGN KEY (`torneo_id`) REFERENCES `torneos` (`id`) ON DELETE CASCADE;
 ALTER TABLE `torneos` ADD CONSTRAINT `torneos_categoria_id_fkey` FOREIGN KEY (`categoria_id`) REFERENCES `torneo_categorias` (`id`) ON DELETE SET NULL;
 ALTER TABLE `torneos` ADD CONSTRAINT `torneos_evento_id_fkey` FOREIGN KEY (`evento_id`) REFERENCES `eventos` (`id`) ON DELETE CASCADE;
 ALTER TABLE `user_badges` ADD CONSTRAINT `user_badges_evento_id_fkey` FOREIGN KEY (`evento_id`) REFERENCES `eventos` (`id`) ON DELETE SET NULL;
