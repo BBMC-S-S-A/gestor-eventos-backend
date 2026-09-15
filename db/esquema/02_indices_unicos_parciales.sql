@@ -1,4 +1,10 @@
-/* Los ocho índices ÚNICOS parciales, uno por uno.
+/* Los diez índices ÚNICOS parciales, uno por uno.
+ *
+ * Eran ocho al escribir esto por primera vez (3 de septiembre). Dos más
+ * aparecieron con migraciones posteriores — `ticket_puestos_token_idx`
+ * (0117, credenciales de montaje) y `espacio_reservas_una_viva` (0092,
+ * espacios vendibles) — y se agregan aquí abajo con el mismo criterio, en
+ * vez de en un archivo aparte: es la misma decisión, no una nueva.
  *
  * Postgres puede decir «esto es único, pero sólo en las filas que cumplan
  * esta condición». MySQL no. Y no es un detalle de rendimiento: quitar la
@@ -45,6 +51,13 @@ CREATE UNIQUE INDEX `waitlist_oferta_token_uidx`
 /* WHERE ticket_id IS NOT NULL — y ticket_id está en la clave. */
 CREATE UNIQUE INDEX `sesion_inscripciones_ticket_uidx`
   ON `sesion_inscripciones` (`session_id`, `ticket_id`);
+
+/* WHERE qr_token IS NOT NULL — y qr_token es la clave entera. Un puesto sin
+   token asignado todavía (o que perdió el suyo al transferirse, ver 007) no
+   entra en la unicidad; en cuanto se le asigna uno, ese token no puede
+   repetirse en ningún otro puesto. */
+CREATE UNIQUE INDEX `ticket_puestos_token_idx`
+  ON `ticket_puestos` (`qr_token`);
 
 /* WHERE padre_id IS NOT NULL — y padre_id está en la clave, así que el NULL
    hace solo el trabajo de la condición parcial. Pero un UNIQUE sobre `nombre`
@@ -123,3 +136,21 @@ ALTER TABLE `waitlist`
 
 CREATE UNIQUE INDEX `waitlist_uniq_email`
   ON `waitlist` (`evento_id`, `ticket_type_id`, `email_en_espera`);
+
+
+/* 5 · espacio_reservas: UNIQUE (espacio_id) WHERE estado IN ('retenido','vendido')
+ *
+ * Un espacio vendible (ver 0092/0117: stands, mesas, sillas) puede tener
+ * muchas reservas en su historial — la que expiró, la que se canceló, la que
+ * finalmente se pagó — pero sólo una puede estar *viva* (reteniendo o ya
+ * vendida) a la vez; si dos reservas activas apuntaran al mismo espacio, se
+ * habría vendido dos veces el mismo asiento. La condición no es sobre NULL,
+ * así que hace falta la columna generada: cuando la reserva pasa a expirada
+ * o cancelada, deja de contar para la unicidad y el espacio queda libre para
+ * una reserva nueva. */
+ALTER TABLE `espacio_reservas`
+  ADD COLUMN `espacio_activo` CHAR(36)
+    AS (IF(`estado` IN ('retenido', 'vendido'), `espacio_id`, NULL)) VIRTUAL;
+
+CREATE UNIQUE INDEX `espacio_reservas_una_viva`
+  ON `espacio_reservas` (`espacio_activo`);

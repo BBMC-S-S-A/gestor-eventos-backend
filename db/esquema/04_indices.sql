@@ -1,23 +1,3 @@
-/* ═══════════════════════════════════════════════════════════════════════════════
- * GESTEK · Volcado de la base de Supabase — 04 · ÍNDICES (no parciales)
- * ═══════════════════════════════════════════════════════════════════════════════
- *
- * Generado: 2026-09-04, corriendo db/esquema/generar-esquema.mjs contra Postgres
- *           (proyecto `GestorEventosMarcaBlanca`, yopontbwgdybfsniqawz).
- * Las PRIMARY KEY ya van en 01_tablas.sql. Los 8 índices únicos parciales
- * NO están aquí — van en 02_indices_unicos_parciales.sql, a mano. Las líneas
- * «-- A MANO» de abajo son el recordatorio de cuáles son.
- *
- * Este archivo es la salida del generador. NO se edita a mano: si el esquema
- * de Postgres cambia, se vuelve a correr este script y se compara con
- * `git diff`. El «por qué» de cada traducción está en
- * `db/migraciones/NOTAS-ESQUEMA.md`; el orden de aplicación de los seis
- * archivos, en el README.md de esta carpeta.
- * ═══════════════════════════════════════════════════════════════════════════════ */
-
-SET NAMES utf8mb4;
-SET time_zone = '+00:00';
-
 CREATE UNIQUE INDEX `agenda_favoritos_session_id_user_id_key` ON `agenda_favoritos` (`session_id`, `user_id`);
 CREATE INDEX `agenda_evento_idx` ON `agenda_sessions` (`evento_id`);
 CREATE INDEX `agenda_sessions_zona_idx` ON `agenda_sessions` (`evento_id`, `zona_id`);
@@ -49,6 +29,12 @@ CREATE INDEX `idx_email_cola_evento` ON `email_cola` (`evento_id`, `created_at`)
 CREATE INDEX `idx_email_cola_pendientes` ON `email_cola` (`prioridad`, `proximo_intento`);  -- era parcial: WHERE (estado = 'pendiente'::text) (no único: la condición se puede tirar)
 CREATE INDEX `email_log_evento_idx` ON `email_log` (`evento_id`, `created_at`);
 CREATE UNIQUE INDEX `email_log_unique` ON `email_log` (`ticket_id`, `tipo`);
+CREATE INDEX `espacio_reservas_caducan_idx` ON `espacio_reservas` (`expira_at`);  -- era parcial: WHERE (estado = 'retenido'::text) (no único: la condición se puede tirar)
+CREATE INDEX `espacio_reservas_evento_idx` ON `espacio_reservas` (`evento_id`, `estado`);
+-- A MANO (único parcial): espacio_reservas_una_viva — CREATE UNIQUE INDEX espacio_reservas_una_viva ON public.espacio_reservas USING btree (espacio_id) WHERE (estado = ANY (ARRAY['retenido'::text, 'vendido'::text]))
+CREATE INDEX `espacios_evento_idx` ON `espacios` (`evento_id`);
+CREATE INDEX `espacios_padre_idx` ON `espacios` (`parent_id`);
+CREATE INDEX `espacios_vendibles_idx` ON `espacios` (`evento_id`);  -- era parcial: WHERE (modo = 'vendible'::text) (no único: la condición se puede tirar)
 CREATE INDEX `event_form_fields_session_idx` ON `event_form_fields` (`session_id`);  -- era parcial: WHERE (session_id IS NOT NULL) (no único: la condición se puede tirar)
 CREATE INDEX `idx_event_form_fields_evento` ON `event_form_fields` (`evento_id`);
 CREATE INDEX `idx_form_fields_ticket_type` ON `event_form_fields` (`ticket_type_id`);
@@ -89,11 +75,15 @@ CREATE INDEX `eventos_fecha_idx` ON `eventos` (`fecha_inicio`);
 CREATE INDEX `eventos_owner_idx` ON `eventos` (`owner_id`);
 CREATE UNIQUE INDEX `eventos_slug_key` ON `eventos` (`slug`);
 CREATE INDEX `networking_citas_evento_idx` ON `networking_citas` (`evento_id`, `estado`);
+CREATE INDEX `networking_citas_guest_email_idx` ON `networking_citas` (`evento_id`, `guest_email`);  -- era parcial: WHERE (guest_email IS NOT NULL) (no único: la condición se puede tirar)
 CREATE UNIQUE INDEX `networking_citas_horario_id_key` ON `networking_citas` (`horario_id`);
+CREATE INDEX `networking_citas_resultado_idx` ON `networking_citas` (`evento_id`, `resultado`);  -- era parcial: WHERE (resultado IS NOT NULL) (no único: la condición se puede tirar)
+CREATE INDEX `networking_citas_sin_recordatorio_idx` ON `networking_citas` (`evento_id`);  -- era parcial: WHERE (recordatorio_at IS NULL) (no único: la condición se puede tirar)
 CREATE INDEX `idx_expositores_evento_activo` ON `networking_expositores` (`evento_id`, `activo`);
 CREATE INDEX `networking_expositores_rueda_idx` ON `networking_expositores` (`evento_id`, `rol`);
 CREATE UNIQUE INDEX `networking_expositores_ticket_id_key` ON `networking_expositores` (`ticket_id`);
 CREATE INDEX `networking_expositores_zona_idx` ON `networking_expositores` (`evento_id`, `zona_id`);
+CREATE INDEX `networking_horarios_bloqueados_idx` ON `networking_horarios` (`expositor_id`);  -- era parcial: WHERE bloqueado (no único: la condición se puede tirar)
 CREATE INDEX `notif_user_idx` ON `notificaciones` (`user_id`, `leida`, `created_at`);
 CREATE INDEX `notif_user_unread_idx` ON `notificaciones` (`user_id`);  -- era parcial: WHERE (leida = false) (no único: la condición se puede tirar)
 CREATE INDEX `idx_oauth_codes_expira` ON `oauth_codes` (`expira_at`);
@@ -122,16 +112,21 @@ CREATE UNIQUE INDEX `profiles_handle_key` ON `profiles` (`handle`);
 CREATE INDEX `profiles_puntos_idx` ON `profiles` (`puntos_total`);  -- era parcial: WHERE (puntos_total > 0) (no único: la condición se puede tirar)
 CREATE UNIQUE INDEX `promociones_evento_id_codigo_key` ON `promociones` (`evento_id`, `codigo`);
 CREATE INDEX `promociones_evento_idx` ON `promociones` (`evento_id`);
+CREATE INDEX `puesto_transf_evento_idx` ON `puesto_transferencias` (`evento_id`, `created_at`);
+CREATE INDEX `puesto_transf_puesto_idx` ON `puesto_transferencias` (`puesto_id`, `created_at`);
 CREATE INDEX `puntos_balance_rank_idx` ON `puntos_balance` (`organizador_id`, `audiencia`, `puntos`);
 CREATE UNIQUE INDEX `puntos_balance_user_id_organizador_id_audiencia_key` ON `puntos_balance` (`user_id`, `organizador_id`, `audiencia`);
 CREATE UNIQUE INDEX `push_subs_endpoint_idx` ON `push_subscriptions` (`endpoint`);
 CREATE INDEX `push_subs_user_idx` ON `push_subscriptions` (`user_id`);
+CREATE UNIQUE INDEX `recintos_nombre_unico` ON `recintos` (`owner_id`, (lower(nombre)));
+CREATE INDEX `recintos_owner_idx` ON `recintos` (`owner_id`, `nombre`);
 CREATE INDEX `idx_recompensas_evento` ON `recompensas` (`evento_id`);
 CREATE INDEX `idx_recompensas_expositor` ON `recompensas` (`expositor_id`);
 CREATE INDEX `recompensas_org_idx` ON `recompensas` (`organizador_id`, `audiencia`, `activo`);
 -- A MANO (único parcial): sesion_inscripciones_email_uidx — CREATE UNIQUE INDEX sesion_inscripciones_email_uidx ON public.sesion_inscripciones USING btree (session_id, lower(email)) WHERE ((ticket_id IS NULL) AND (email IS NOT NULL))
 CREATE INDEX `sesion_inscripciones_evento_idx` ON `sesion_inscripciones` (`evento_id`, `session_id`);
 CREATE INDEX `sesion_inscripciones_sesion_idx` ON `sesion_inscripciones` (`session_id`, `estado`);
+CREATE INDEX `sesion_inscripciones_ticket_idx` ON `sesion_inscripciones` (`ticket_id`);  -- era parcial: WHERE (ticket_id IS NOT NULL) (no único: la condición se puede tirar)
 -- A MANO (único parcial): sesion_inscripciones_ticket_uidx — CREATE UNIQUE INDEX sesion_inscripciones_ticket_uidx ON public.sesion_inscripciones USING btree (session_id, ticket_id) WHERE (ticket_id IS NOT NULL)
 CREATE INDEX `speakers_evento_idx` ON `speakers` (`evento_id`);
 CREATE INDEX `sugerencias_catalogo_idx` ON `sugerencias_catalogo` (`catalogo`, `estado`, `created_at`);
@@ -152,20 +147,34 @@ CREATE INDEX `ticket_movimientos_evento_idx` ON `ticket_movimientos` (`evento_id
 CREATE INDEX `ticket_movimientos_ticket_idx` ON `ticket_movimientos` (`ticket_id`);
 CREATE INDEX `ticket_movimientos_zona_id_idx` ON `ticket_movimientos` (`evento_id`, `zona_id`, `created_at`);
 CREATE INDEX `ticket_movimientos_zona_idx` ON `ticket_movimientos` (`evento_id`, `zona`);
+CREATE INDEX `ticket_puestos_evento_idx` ON `ticket_puestos` (`evento_id`, `estado`);
+CREATE UNIQUE INDEX `ticket_puestos_orden_unico` ON `ticket_puestos` (`ticket_id`, `orden`);
+CREATE INDEX `ticket_puestos_por_autorizar_idx` ON `ticket_puestos` (`evento_id`, `autorizado_at`);  -- era parcial: WHERE (autorizado_at IS NULL) (no único: la condición se puede tirar)
+CREATE INDEX `ticket_puestos_ticket_idx` ON `ticket_puestos` (`ticket_id`);
+-- A MANO (único parcial): ticket_puestos_token_idx — CREATE UNIQUE INDEX ticket_puestos_token_idx ON public.ticket_puestos USING btree (qr_token) WHERE (qr_token IS NOT NULL)
+CREATE INDEX `tte_espacio_idx` ON `ticket_type_espacios` (`espacio_id`);
 CREATE INDEX `ticket_types_evento_idx` ON `ticket_types` (`evento_id`);
 CREATE INDEX `idx_tickets_legal_version` ON `tickets` (`evento_id`, `legal_version`);  -- era parcial: WHERE (legal_version IS NOT NULL) (no único: la condición se puede tirar)
 CREATE UNIQUE INDEX `tickets_codigo_key` ON `tickets` (`codigo`);
 CREATE INDEX `tickets_estado_idx` ON `tickets` (`estado`);
 CREATE INDEX `tickets_evento_idx` ON `tickets` (`evento_id`);
+CREATE INDEX `tickets_evento_tipo_idx` ON `tickets` (`evento_id`, `ticket_type_id`);
 CREATE INDEX `tickets_evento_user_estado_idx` ON `tickets` (`evento_id`, `user_id`, `estado`);
+CREATE INDEX `tickets_origen_idx` ON `tickets` (`evento_id`, `origen`);  -- era parcial: WHERE (origen IS NOT NULL) (no único: la condición se puede tirar)
 CREATE INDEX `tickets_promocion_idx` ON `tickets` (`promocion_id`);  -- era parcial: WHERE (promocion_id IS NOT NULL) (no único: la condición se puede tirar)
 CREATE UNIQUE INDEX `tickets_qr_token_key` ON `tickets` (`qr_token`);
 CREATE INDEX `tickets_user_idx` ON `tickets` (`user_id`);
+CREATE INDEX `torneo_calificaciones_equipo_idx` ON `torneo_calificaciones` (`equipo_id`);
+CREATE INDEX `torneo_calificaciones_jurado_idx` ON `torneo_calificaciones` (`jurado_id`);
+CREATE INDEX `torneo_calificaciones_ronda_idx` ON `torneo_calificaciones` (`ronda_id`);
+CREATE UNIQUE INDEX `torneo_calificaciones_unica` ON `torneo_calificaciones` (`ronda_id`, `criterio_id`, `equipo_id`, `jurado_id`);
 CREATE INDEX `torneo_categorias_evento_idx` ON `torneo_categorias` (`evento_id`, `orden`);
 CREATE INDEX `torneo_categorias_padre_idx` ON `torneo_categorias` (`padre_id`);  -- era parcial: WHERE (padre_id IS NOT NULL) (no único: la condición se puede tirar)
 -- A MANO (único parcial): torneo_categorias_unica_hija — CREATE UNIQUE INDEX torneo_categorias_unica_hija ON public.torneo_categorias USING btree (evento_id, padre_id, lower(nombre)) WHERE (padre_id IS NOT NULL)
 -- A MANO (único parcial): torneo_categorias_unica_raiz — CREATE UNIQUE INDEX torneo_categorias_unica_raiz ON public.torneo_categorias USING btree (evento_id, lower(nombre)) WHERE (padre_id IS NULL)
+CREATE INDEX `torneo_criterios_torneo_id_idx` ON `torneo_criterios` (`torneo_id`);
 CREATE UNIQUE INDEX `torneo_equipos_ticket_id_key` ON `torneo_equipos` (`ticket_id`);
+CREATE INDEX `torneo_rondas_torneo_id_idx` ON `torneo_rondas` (`torneo_id`);
 CREATE INDEX `idx_torneos_evento_orden` ON `torneos` (`evento_id`, `orden`);
 CREATE INDEX `torneos_categoria_idx` ON `torneos` (`categoria_id`);  -- era parcial: WHERE (categoria_id IS NOT NULL) (no único: la condición se puede tirar)
 CREATE UNIQUE INDEX `user_badges_user_id_badge_slug_evento_id_key` ON `user_badges` (`user_id`, `badge_slug`, `evento_id`);

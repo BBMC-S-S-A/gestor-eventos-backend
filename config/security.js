@@ -205,6 +205,19 @@ function explicarCorsRechazado(req, res, next) {
 function applySecurity(app) {
   app.set('trust proxy', 1); // necesario detrás de cloudflared / Vercel / Railway
 
+  /* `Cache-Control: no-store` en toda respuesta. Sin esto, cualquier proxy
+     intermedio (el NGINX de cPanel, un CDN, el propio navegador) es libre de
+     guardar la respuesta de un GET y servirla vieja en la siguiente petición
+     — visto en producción: un PATCH que sí escribía, y el GET de refresco
+     inmediatamente después devolviendo el valor de ANTES, así que un cambio
+     parecía no haber pasado hasta reintentarlo. Esta API es toda dinámica y
+     casi toda autenticada; no hay nada aquí que valga la pena cachear a costa
+     de mostrar datos viejos. */
+  app.use((req, res, next) => {
+    res.set('Cache-Control', 'no-store');
+    next();
+  });
+
   app.use(helmet(helmetOptions));
   /* ANTES de `cors`, no después: una petición de sondeo (OPTIONS) la contesta
      `cors` por su cuenta con un 204 y ya no llega aquí. Delante, el 403 con el

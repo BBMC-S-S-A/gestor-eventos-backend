@@ -4,11 +4,24 @@ Volcado del esquema de producción (proyecto Supabase
 `GestorEventosMarcaBlanca` / `yopontbwgdybfsniqawz`, Postgres 17.6, esquema
 `public`) traducido a **MySQL 8**, listo para crear la base en cPanel.
 
-**Generado el 2026-09-01, y ya está por detrás.** Entre el 2 y el 3 de
-septiembre se aplicaron las migraciones 0091–0096 y esto no las tiene: falta la
-tabla `zonas` entera, `ticket_types.crea` y `crea_torneo_id`, y
-`torneo_equipos.respuestas`. Antes de usarlo en serio hay que volver a correr el
-generador (paso 1 de abajo) y mirar `git diff`.
+**Regenerado el 2026-09-15** (`01_tablas.sql`, `04_indices.sql`,
+`05_claves_foraneas.sql`), corriendo el generador contra Postgres tal como
+estaba en producción ese día — hasta la migración `0128`. Trae 11 tablas que no
+estaban en el volcado del 1 de septiembre (`zonas`, `espacios`,
+`espacio_reservas`, `ticket_puestos`, `ticket_type_espacios`,
+`puesto_transferencias`, `recintos`, y las cuatro de calificación de torneos:
+`torneo_criterios`, `torneo_rondas`, `torneo_ronda_participantes`,
+`torneo_calificaciones`). **`02_indices_unicos_parciales.sql` ya está al día**: a los 8 parciales
+conocidos al 3 de septiembre se le sumaron los 2 que aparecieron después
+(`ticket_puestos_token_idx` y `espacio_reservas_una_viva`), con el mismo
+criterio documentado ahí. `04_indices.sql` los deja marcados con `-- A MANO`
+en vez de emitirlos, que es la señal de que hay que ir a buscarlos a
+`02_indices_unicos_parciales.sql` / `../migraciones/003_esquema_indices_parciales.sql`
+en el orden de aplicación (paso 2, antes que `04_indices.sql`). **`03_datos.sql` tampoco existe todavía** — sigue
+pendiente de generarse con `generar-datos.mjs` y la contraseña de Postgres, que
+esta sesión no tiene ni debe tener. Antes de usar esto en serio, volver a correr
+el generador (paso 1 de abajo) y mirar `git diff` contra el estado real de
+producción en ese momento.
 
 El traspaso completo del frente —qué falta, con qué herramientas y qué le va a
 faltar a quien lo retome— está en [`../CAMINO-A.md`](../CAMINO-A.md).

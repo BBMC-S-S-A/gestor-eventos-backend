@@ -1,23 +1,3 @@
-/* ═══════════════════════════════════════════════════════════════════════════════
- * GESTEK · Volcado de la base de Supabase — 01 · TABLAS
- * ═══════════════════════════════════════════════════════════════════════════════
- *
- * Generado: 2026-09-04, corriendo db/esquema/generar-esquema.mjs contra Postgres
- *           (proyecto `GestorEventosMarcaBlanca`, yopontbwgdybfsniqawz).
- * 69 tablas.
- *
- * Este archivo es la salida del generador. NO se edita a mano: si el esquema
- * de Postgres cambia, se vuelve a correr este script y se compara con
- * `git diff`. El «por qué» de cada traducción está en
- * `db/migraciones/NOTAS-ESQUEMA.md`; el orden de aplicación de los seis
- * archivos, en el README.md de esta carpeta.
- * ═══════════════════════════════════════════════════════════════════════════════ */
-
-SET NAMES utf8mb4;
-SET time_zone = '+00:00';
-SET FOREIGN_KEY_CHECKS = 0;
-
-
 CREATE TABLE `agenda_favoritos` (
   `id` CHAR(36) NOT NULL,
   `session_id` CHAR(36) NOT NULL,
@@ -208,6 +188,35 @@ CREATE TABLE `email_log` (
   PRIMARY KEY (`id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_as_ci;
 
+CREATE TABLE `espacio_reservas` (
+  `id` CHAR(36) NOT NULL,
+  `espacio_id` CHAR(36) NOT NULL,
+  `evento_id` CHAR(36) NOT NULL,
+  `estado` VARCHAR(255) NOT NULL,
+  `ticket_id` CHAR(36) NULL,
+  `sesion_compra` TEXT NULL,
+  `expira_at` DATETIME(6) NULL,
+  `created_at` DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  `updated_at` DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  PRIMARY KEY (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_as_ci;
+
+CREATE TABLE `espacios` (
+  `id` CHAR(36) NOT NULL,
+  `evento_id` CHAR(36) NOT NULL,
+  `parent_id` CHAR(36) NULL,
+  `nombre` TEXT NOT NULL,
+  `tipo` TEXT NOT NULL DEFAULT ('zona'),
+  `modo` TEXT NOT NULL DEFAULT ('aforo'),
+  `aforo_max` INT NULL,
+  `capacidad` INT NOT NULL DEFAULT 1,
+  `geometria` JSON NULL,
+  `atributos` JSON NOT NULL DEFAULT (CAST('{}' AS JSON)),
+  `orden` INT NOT NULL DEFAULT 0,
+  `created_at` DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  PRIMARY KEY (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_as_ci;
+
 CREATE TABLE `event_form_fields` (
   `id` CHAR(36) NOT NULL,
   `evento_id` CHAR(36) NOT NULL,
@@ -224,6 +233,9 @@ CREATE TABLE `event_form_fields` (
   `buscable` TINYINT(1) NULL,
   `visible_si` JSON NULL,
   `torneo_id` CHAR(36) NULL,
+  `max_caracteres` INT NULL,
+  `max_palabras` INT NULL,
+  `sensible` TINYINT(1) NOT NULL DEFAULT 0,
   PRIMARY KEY (`id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_as_ci;
 
@@ -465,6 +477,8 @@ CREATE TABLE `eventos` (
   `paginas` JSON NOT NULL DEFAULT (CAST('[]' AS JSON)),
   `navbar` JSON NOT NULL DEFAULT (CAST('{}' AS JSON)),
   `networking_modo` TEXT NOT NULL DEFAULT ('auto'),
+  `networking_activo` TINYINT(1) NOT NULL DEFAULT 0,
+  `networking_tope_por_empresa` INT NULL,
   PRIMARY KEY (`id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_as_ci;
 
@@ -472,12 +486,23 @@ CREATE TABLE `networking_citas` (
   `id` CHAR(36) NOT NULL,
   `horario_id` CHAR(36) NOT NULL,
   `evento_id` CHAR(36) NOT NULL,
-  `user_id` CHAR(36) NOT NULL,
+  `user_id` CHAR(36) NULL,
   `estado` VARCHAR(255) NOT NULL DEFAULT ('confirmada'),
   `created_at` DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
   `notas` TEXT NULL,
   `nota_gestor` TEXT NULL,
   `creada_por` CHAR(36) NULL,
+  `guest_email` VARCHAR(255) NULL,
+  `guest_nombre` TEXT NULL,
+  `resultado` VARCHAR(255) NULL,
+  `resultado_at` DATETIME(6) NULL,
+  `resultado_por` CHAR(36) NULL,
+  `expectativa_monto` DECIMAL(14,2) NULL,
+  `expectativa_moneda` TEXT NULL,
+  `expectativa_plazo` TEXT NULL,
+  `hubo_acuerdo` TINYINT(1) NULL,
+  `resultado_nota` TEXT NULL,
+  `recordatorio_at` DATETIME(6) NULL,
   PRIMARY KEY (`id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_as_ci;
 
@@ -514,6 +539,8 @@ CREATE TABLE `networking_horarios` (
   `inicio` DATETIME(6) NOT NULL,
   `fin` DATETIME(6) NOT NULL,
   `created_at` DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  `bloqueado` TINYINT(1) NOT NULL DEFAULT 0,
+  `bloqueo_motivo` TEXT NULL,
   PRIMARY KEY (`id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_as_ci;
 
@@ -726,6 +753,23 @@ CREATE TABLE `promociones` (
   PRIMARY KEY (`id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_as_ci;
 
+CREATE TABLE `puesto_transferencias` (
+  `id` CHAR(36) NOT NULL,
+  `puesto_id` CHAR(36) NOT NULL,
+  `evento_id` CHAR(36) NOT NULL,
+  `de_nombre` TEXT NULL,
+  `de_email` TEXT NULL,
+  `a_nombre` TEXT NULL,
+  `a_email` TEXT NULL,
+  `a_documento` TEXT NULL,
+  `monto` DECIMAL(12,2) NULL,
+  `currency` TEXT NULL,
+  `via` TEXT NOT NULL DEFAULT ('titular'),
+  `actor_id` CHAR(36) NULL,
+  `created_at` DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  PRIMARY KEY (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_as_ci;
+
 CREATE TABLE `puntos_balance` (
   `id` CHAR(36) NOT NULL,
   `user_id` CHAR(36) NOT NULL,
@@ -744,6 +788,20 @@ CREATE TABLE `push_subscriptions` (
   `user_agent` TEXT NULL,
   `created_at` DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
   `last_seen_at` DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  PRIMARY KEY (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_as_ci;
+
+CREATE TABLE `recintos` (
+  `id` CHAR(36) NOT NULL,
+  `owner_id` CHAR(36) NOT NULL,
+  `nombre` VARCHAR(255) NOT NULL,
+  `ciudad` TEXT NULL,
+  `direccion` TEXT NULL,
+  `aforo_legal` INT NULL,
+  `plano` JSON NOT NULL DEFAULT (CAST('[]' AS JSON)),
+  `fondo` JSON NULL,
+  `created_at` DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  `updated_at` DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
   PRIMARY KEY (`id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_as_ci;
 
@@ -902,6 +960,33 @@ CREATE TABLE `ticket_movimientos` (
   PRIMARY KEY (`id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_as_ci;
 
+CREATE TABLE `ticket_puestos` (
+  `id` CHAR(36) NOT NULL,
+  `ticket_id` CHAR(36) NOT NULL,
+  `evento_id` CHAR(36) NOT NULL,
+  `orden` INT NOT NULL DEFAULT 1,
+  `nombre` TEXT NULL,
+  `email` TEXT NULL,
+  `documento` TEXT NULL,
+  `qr_token` VARCHAR(255) NULL,
+  `estado` VARCHAR(255) NOT NULL DEFAULT ('libre'),
+  `asignado_at` DATETIME(6) NULL,
+  `usado_at` DATETIME(6) NULL,
+  `created_at` DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  `foto_url` TEXT NULL,
+  `telefono` TEXT NULL,
+  `autorizado_at` DATETIME(6) NULL,
+  `autorizado_por` TEXT NULL,
+  `credencial_gen` INT NOT NULL DEFAULT 0,
+  PRIMARY KEY (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_as_ci;
+
+CREATE TABLE `ticket_type_espacios` (
+  `ticket_type_id` CHAR(36) NOT NULL,
+  `espacio_id` CHAR(36) NOT NULL,
+  PRIMARY KEY (`ticket_type_id`, `espacio_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_as_ci;
+
 CREATE TABLE `ticket_types` (
   `id` CHAR(36) NOT NULL,
   `evento_id` CHAR(36) NOT NULL,
@@ -921,6 +1006,15 @@ CREATE TABLE `ticket_types` (
   `es_expositor` TINYINT(1) NOT NULL DEFAULT 0,
   `crea` TEXT NOT NULL DEFAULT ('nada'),
   `crea_torneo_id` CHAR(36) NULL,
+  `modo_entrada` TEXT NOT NULL DEFAULT ('individual'),
+  `color` TEXT NULL,
+  `rol` TEXT NOT NULL DEFAULT ('entrada'),
+  `instrucciones` TEXT NULL,
+  `vigencia_desde` DATETIME(6) NULL,
+  `vigencia_hasta` DATETIME(6) NULL,
+  `requiere_autorizacion` TINYINT(1) NOT NULL DEFAULT 0,
+  `visible_publico` TINYINT(1) NOT NULL DEFAULT 1,
+  `autoriza` TEXT NOT NULL DEFAULT ('evento'),
   PRIMARY KEY (`id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_as_ci;
 
@@ -945,6 +1039,20 @@ CREATE TABLE `tickets` (
   `legal_aceptado_at` DATETIME(6) NULL,
   `legal_version` VARCHAR(255) NULL,
   `promocion_id` CHAR(36) NULL,
+  `origen` VARCHAR(255) NULL,
+  PRIMARY KEY (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_as_ci;
+
+CREATE TABLE `torneo_calificaciones` (
+  `id` CHAR(36) NOT NULL,
+  `ronda_id` CHAR(36) NOT NULL,
+  `criterio_id` CHAR(36) NOT NULL,
+  `equipo_id` CHAR(36) NOT NULL,
+  `jurado_id` CHAR(36) NOT NULL,
+  `puntaje` DECIMAL(6,2) NOT NULL,
+  `comentario` TEXT NULL,
+  `created_at` DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  `updated_at` DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
   PRIMARY KEY (`id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_as_ci;
 
@@ -953,6 +1061,16 @@ CREATE TABLE `torneo_categorias` (
   `evento_id` CHAR(36) NOT NULL,
   `padre_id` CHAR(36) NULL,
   `nombre` TEXT NOT NULL,
+  `orden` INT NOT NULL DEFAULT 0,
+  `created_at` DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  PRIMARY KEY (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_as_ci;
+
+CREATE TABLE `torneo_criterios` (
+  `id` CHAR(36) NOT NULL,
+  `torneo_id` CHAR(36) NOT NULL,
+  `nombre` TEXT NOT NULL,
+  `puntaje_maximo` DECIMAL(6,2) NOT NULL DEFAULT 10,
   `orden` INT NOT NULL DEFAULT 0,
   `created_at` DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
   PRIMARY KEY (`id`)
@@ -971,6 +1089,13 @@ CREATE TABLE `torneo_equipos` (
   `ticket_id` CHAR(36) NULL,
   `respuestas` JSON NOT NULL DEFAULT (CAST('{}' AS JSON)),
   PRIMARY KEY (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_as_ci;
+
+CREATE TABLE `torneo_jurados` (
+  `torneo_id` CHAR(36) NOT NULL,
+  `user_id` CHAR(36) NOT NULL,
+  `created_at` DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  PRIMARY KEY (`torneo_id`, `user_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_as_ci;
 
 CREATE TABLE `torneo_partidos` (
@@ -992,6 +1117,23 @@ CREATE TABLE `torneo_partidos` (
   PRIMARY KEY (`id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_as_ci;
 
+CREATE TABLE `torneo_ronda_participantes` (
+  `ronda_id` CHAR(36) NOT NULL,
+  `equipo_id` CHAR(36) NOT NULL,
+  PRIMARY KEY (`ronda_id`, `equipo_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_as_ci;
+
+CREATE TABLE `torneo_rondas` (
+  `id` CHAR(36) NOT NULL,
+  `torneo_id` CHAR(36) NOT NULL,
+  `nombre` TEXT NOT NULL,
+  `orden` INT NOT NULL DEFAULT 0,
+  `avanzan` INT NULL,
+  `estado` TEXT NOT NULL DEFAULT ('pendiente'),
+  `created_at` DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  PRIMARY KEY (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_as_ci;
+
 CREATE TABLE `torneos` (
   `id` CHAR(36) NOT NULL,
   `evento_id` CHAR(36) NOT NULL,
@@ -1005,6 +1147,8 @@ CREATE TABLE `torneos` (
   `disciplina` TEXT NULL,
   `orden` INT NOT NULL DEFAULT 0,
   `categoria_id` CHAR(36) NULL,
+  `modo_calificacion` TEXT NULL,
+  `modo_rondas` TEXT NULL,
   PRIMARY KEY (`id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_as_ci;
 
