@@ -1,61 +1,69 @@
 # Migraciones pendientes en Supabase
 
-**Queda media: la segunda mitad de la 0126.** Estado comprobado contra la base
-real el 2026-09-17, preguntando por los objetos, no por lo que diga este
-archivo — que antes decía «No queda ninguna» y era falso.
+**No queda ninguna** — y esta vez está comprobado objeto por objeto contra la
+base real, no dicho de memoria. La última vez este archivo afirmaba lo mismo y
+había dos migraciones sin correr.
 
 ## Lo aplicado el 2026-09-17
 
 | Nº | Qué | Estado |
 |---|---|---|
-| 0125 | `ticket_movimientos.puesto_id` + su índice parcial | ✅ aplicada |
-| 0126 · tablas | `derechos`, `derecho_ventanas`, `derecho_consumos`, sus índices y los dos únicos | ✅ aplicada |
-| 0126 · RLS | `enable row level security` en las tres | ✅ aplicada — **no venía en la migración**, se añadió |
+| 0125 | `ticket_movimientos.puesto_id` + su índice parcial | ✅ |
+| 0126 · tablas | `derechos`, `derecho_ventanas`, `derecho_consumos`, índices y los dos únicos | ✅ |
+| 0126 · RLS | `enable row level security` en las tres | ✅ — **no venía en la migración**, se añadió |
+| 0126 · función | `private.fn_roles_semilla()` con `entregar` en Administrador | ✅ |
+| 0126 · roles | `entregar` añadido a los roles que ya existían | ✅ — 114 roles en 38 eventos |
 
-Las dos estaban escritas desde hacía días y nunca se habían corrido, mientras
-que la 0127 y la 0128 —posteriores— sí. No era una cola a medias: eran dos
-salteadas. Por eso mirar el número más alto no dice qué falta.
+La 0125 y la 0126 llevaban días escritas y sin correr, mientras la 0127 y la
+0128 —posteriores— sí estaban aplicadas. No era una cola a medias: eran dos
+salteadas. **Mirar el número más alto no dice qué falta.**
 
-## Lo que FALTA: el permiso `entregar`
+## La vuelta atrás del permiso `entregar`
 
-La 0126 tiene una segunda mitad que no se aplicó: redefine
-`private.fn_roles_semilla()` para que el rol Administrador nazca con el permiso
-`entregar`, y luego se lo añade a los roles que ya existen:
-
-```sql
-update public.event_roles r
-   set permissions = coalesce(
-         (select jsonb_agg(distinct p)
-            from jsonb_array_elements_text(r.permissions || '["entregar"]'::jsonb) p),
-         r.permissions)
- where r.permissions ? 'editar_evento'
-   and not (r.permissions ? 'entregar');
-```
-
-**Hoy hay 114 roles con `editar_evento` y sin `entregar`.** Mientras eso no
-corra, las tablas están pero nadie tiene permiso de entregar nada: los
-refrigerios siguen sin poder usarse, sólo que ahora el motivo es otro.
-
-Es un `update` sobre permisos de todos los eventos, así que conviene correrlo a
-la vista de alguien y no dentro de un lote. Comprobación después:
+Antes del `update` se guardó la foto exacta de las 114 filas, porque había un
+rol que ya tenía `entregar` por su cuenta y un rollback a lo bruto se lo
+habría quitado:
 
 ```sql
-select count(*) from public.event_roles
- where permissions ? 'editar_evento' and not (permissions ? 'entregar');
--- tiene que dar 0
+update public.event_roles r set permissions = z.permissions
+  from public.zz_rollback_0126b_entregar z where z.id = r.id;
+drop table public.zz_rollback_0126b_entregar;
 ```
 
-## Cómo se comprueba todo lo demás
+Esa tabla se puede borrar cuando el permiso lleve un tiempo funcionando.
+
+### Comprobación de que el `update` no se llevó nada por delante
+
+`jsonb_agg(distinct …)` **reconstruye el array**, así que el orden cambia y
+comparar los `jsonb` tal cual da 12 falsos positivos. Comparados como conjuntos
+ordenados, el resultado es limpio:
+
+```sql
+with cmp as (
+  select (select array_agg(x order by x) from jsonb_array_elements_text(z.permissions) x) as antes,
+         (select array_agg(x order by x) from jsonb_array_elements_text(r.permissions - 'entregar') x) as despues,
+         jsonb_array_length(z.permissions) n_antes, jsonb_array_length(r.permissions) n_despues
+    from public.event_roles r join public.zz_rollback_0126b_entregar z on z.id = r.id)
+select count(*) filter (where antes is distinct from despues) as perdio_o_gano_algo,
+       count(*) filter (where n_despues <> n_antes + 1)       as no_sumo_exactamente_uno
+  from cmp;
+-- 0 y 0. Los 114 sumaron exactamente un permiso y ninguno perdió nada.
+```
+
+## Cómo se comprueba todo
 
 ```sql
 select to_regclass('public.derechos')         as t1,
        to_regclass('public.derecho_ventanas') as t2,
        to_regclass('public.derecho_consumos') as t3,
        (select count(*) from information_schema.columns
-          where table_name='ticket_movimientos' and column_name='puesto_id') as c0125;
+          where table_name='ticket_movimientos' and column_name='puesto_id') as c0125,
+       (select count(*) from public.event_roles
+          where permissions ? 'editar_evento' and not (permissions ? 'entregar')) as sin_entregar;
 ```
 
-Las tres tablas con nombre y `c0125 = 1`. Verificado el 2026-09-17.
+Las tres tablas con nombre, `c0125 = 1` y `sin_entregar = 0`. Verificado el
+2026-09-17.
 
 ## Y lo que hace falta DESPUÉS
 
@@ -66,6 +74,7 @@ en `docs/DERECHOS.md`.
 ---
 
 ## Historial anterior
+
 
 
 
