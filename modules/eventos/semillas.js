@@ -116,7 +116,7 @@ const ROLES = [
      agenda es de Programación. */
   { nombre: 'Staff · Logística', descripcion: 'Montaje, técnica y escenario', orden: 4,
     permissions: ['crear_canales', 'checkin', 'ver_documentos', 'gestionar_documentos',
-                  'gestionar_acreditacion', 'gestionar_accesos'] },
+                  'gestionar_acreditacion', 'gestionar_accesos', 'gestionar_zonas'] },
   { nombre: 'Atención',          descripcion: 'Atiende asistentes durante el evento', orden: 5,
     permissions: ['ver_clientes', 'gestionar_clientes', 'checkin', 'gestionar_solicitudes', 'gestionar_padron'] },
   { nombre: 'VIP host',          descripcion: 'Anfitrión de zona VIP', orden: 6,

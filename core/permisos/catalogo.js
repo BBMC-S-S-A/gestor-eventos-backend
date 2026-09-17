@@ -47,6 +47,11 @@ const CATALOGO = [
      quien organiza como el único que puede decir que la puerta 3 admite
      prensa — una tarea de logística que hace otra persona. */
   { id: 'gestionar_accesos',     grupo: 'Espacio',   label: 'Configurar accesos e ingresos' },
+  /* Las zonas del evento y su plano. Crear una zona pedía
+     `editar_pagina_publica` y colocarla en el mapa `editar_evento`: para que
+     logística dibujara el recinto había que dejarle reescribir la landing y el
+     evento entero. */
+  { id: 'gestionar_zonas',       grupo: 'Espacio',   label: 'Configurar zonas y mapa del evento' },
 
   { id: 'invitar_staff',         grupo: 'Equipo',    label: 'Invitar al equipo' },
   { id: 'gestionar_roles',       grupo: 'Equipo',    label: 'Gestionar roles' },
