@@ -1,4 +1,4 @@
--- 0129 · Las zonas en los permisos de los roles
+-- 0130 · Las zonas en los permisos de los roles (nació como 0129: número repetido con la del NIT, renumerada sin cambiar el contenido)
 --
 -- Crear una zona pedía `editar_pagina_publica`, y colocarla en el plano
 -- `editar_evento`. Para que logística dibujara el recinto había que darle la
