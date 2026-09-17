@@ -16,11 +16,55 @@ function assertOwner(eventoId, userId, perms = PERMS_EQUIPO) {
   return assertPermiso(eventoId, userId, perms, 'id, owner_id');
 }
 
+/* Quién puede LEER el equipo, que no es lo mismo que quién puede tocarlo.
+ *
+ * Listar el equipo pedía `invitar_staff | gestionar_roles | remover_miembros`,
+ * o sea permisos de GESTIÓN. Pero la lista no la usa sólo quien gestiona: el
+ * chat (`ChatTab`) y las tareas (`TareasTab`) la piden para poner nombre y
+ * avatar a cada persona, y esas dos pantallas son de todo el mundo — el propio
+ * frontend lo da por sentado («Ver tus tareas y el chat del equipo» es lo único
+ * que `loQuePuedoHacer` ofrece SIEMPRE, sin mirar permisos).
+ *
+ * El resultado era un 403 en cada carga de chat o de tareas para cualquiera que
+ * no gestione el equipo. Las tres llamadas lo tragan con un `.catch`, así que
+ * no se veía un error: se veía una lista de mensajes sin nombres y un selector
+ * de responsables vacío, que es peor porque no se sabe que falta algo.
+ *
+ * Pertenecer basta para leer. Lo que sigue pidiendo permiso es invitar, cambiar
+ * un rol y quitar a alguien — POST, PATCH y DELETE, que no se tocan.
+ *
+ * Quien no gestiona NO recibe los correos: es la misma línea que ya se trazó al
+ * sacar la ficha entera del chat y dejar sólo nombre y avatar. Y no recibe a
+ * los invitados que aún no aceptan, que no tienen perfil ni aparecen en el chat
+ * ni se les asigna nada: son asunto de quien gestiona. */
+async function accesoDeLectura(eventoId, userId) {
+  try {
+    return { evento: await assertOwner(eventoId, userId), gestiona: true };
+  } catch (e) {
+    /* 'Evento no encontrado.' sube tal cual — son 400, no 403. */
+    if (e.message !== 'No autorizado.') throw e;
+  }
+
+  const [{ data: ev }, { data: miembro }] = await Promise.all([
+    supabase.from('eventos').select('id, owner_id').eq('id', eventoId).maybeSingle(),
+    supabase.from('event_members').select('id')
+      .eq('evento_id', eventoId).eq('user_id', userId).eq('status', 'active').maybeSingle(),
+  ]);
+  if (!ev || !miembro) throw new Error('No autorizado.');
+  return { evento: ev, gestiona: false };
+}
+
+const sinCorreo = (m) => ({
+  ...m,
+  email: null,
+  profile: m.profile ? { ...m.profile, email: null } : m.profile,
+});
+
 /* GET /eventos/:eventoId/equipo */
-router.get('/:eventoId/equipo', sesion("Cada ruta llama a assertOwner con la lista de permisos que le toca (invitar_staff, gestionar_roles, remover_miembros): el permiso se comprueba dentro, contra el rol del miembro."), async (req, res) => {
+router.get('/:eventoId/equipo', sesion("Leer el equipo lo puede cualquier miembro activo (el chat y las tareas lo necesitan); quien no gestiona lo recibe sin correos y sin invitaciones pendientes. Invitar, cambiar rol y quitar siguen pidiendo su permiso."), async (req, res) => {
   const eventoId = req.params.eventoId;
   try {
-    const evento = await assertOwner(eventoId, req.user.id);
+    const { evento, gestiona } = await accesoDeLectura(eventoId, req.user.id);
     const { data: miembros, error } = await supabase
       .from('event_members')
       .select(`
@@ -38,7 +82,13 @@ router.get('/:eventoId/equipo', sesion("Cada ruta llama a assertOwner con la lis
        ofrecerle cambiarse el rol a si mismo — algo que el servidor rechaza. */
     const { data: owner } = await supabase
       .from('profiles').select('id, nombre, avatar_url, email').eq('id', evento.owner_id).maybeSingle();
-    res.json({ owner, miembros: miembros || [] });
+
+    if (gestiona) return res.json({ owner, miembros: miembros || [] });
+
+    return res.json({
+      owner: owner ? { ...owner, email: null } : owner,
+      miembros: (miembros || []).filter(m => m.profile?.id).map(sinCorreo),
+    });
   } catch (e) {
     res.status(e.message === 'No autorizado.' ? 403 : 400).json({ error: e.message });
   }
