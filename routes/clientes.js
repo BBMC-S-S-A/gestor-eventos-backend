@@ -21,6 +21,7 @@ const { auditar } = require('../lib/auditar.js');
 const { enviarEmailEvento } = require('../lib/emailPlantillas.js');
 const { enlaceBoleta } = require('../lib/enlacePublico.js');
 const { zonasDelEvento, ocupacion, juntar, agendaPorZona } = require('../lib/aforoZonas.js');
+const salaUnica = require('../lib/salaUnica.js');
 const { leerPuerta } = require('../lib/zonasTabla.js');
 const { COLS_TARJETA, standsPorZona } = require('../lib/expositores.js');
 const { generarCodigo } = require('../lib/codigos.js');
@@ -1293,6 +1294,31 @@ router.post('/:eventoId/reingreso', sesion('Lo opera quien está en la puerta: l
     }
     if (error) return res.status(500).json({ error: error.message });
 
+    /* Entrar en una sala saca de la anterior.
+     *
+     * El aforo de una zona sólo bajaba si alguien escaneaba AL SALIR, y la
+     * gente no sale escaneando: se levanta y se va a la charla de al lado. El
+     * número de la sala A se quedaba clavado toda la jornada, subiendo y sin
+     * bajar nunca, hasta decir que había 600 personas en un salón de 120.
+     *
+     * Va DESPUÉS del insert de arriba y no dentro: el movimiento que alguien
+     * acaba de escanear ya está guardado pase lo que pase aquí. Si esto falla,
+     * se pierde una salida deducida —el aforo cuenta de más, como antes— y no
+     * el escaneo de la puerta, que es el dato de verdad.
+     *
+     * Ver `lib/salaUnica.js` para lo que asume y lo que deja fuera. */
+    let salidasAuto = [];
+    if (zona && nuevo === 'entrada') {
+      const r = await salaUnica.salirDeLasOtrasSalas({
+        ticketId: ticket.id,
+        eventoId,
+        zonaNueva: zona,
+        puestoId: enMesa.aplica ? enMesa.puesto.id : null,
+        operadorId: req.user.id,
+      });
+      salidasAuto = r.salidas || [];
+    }
+
     /* Estado de la zona DESPUÉS del movimiento — es lo que el escáner pinta.
        El aforo no bloquea: si está lleno se registra igual y se avisa. */
     let estadoZona = null;
@@ -1303,6 +1329,10 @@ router.post('/:eventoId/reingreso', sesion('Lo opera quien está en la puerta: l
 
     res.status(201).json({
       ok: true, movimiento: mov, dentro: nuevo === 'entrada', zona: zonaNombre, aforo: estadoZona,
+      /* De qué salas se la sacó al entrar en ésta. Se devuelve para poder
+         DECIRLO en la puerta: una salida que nadie escaneó y que nadie ve es
+         indistinguible de un error de conteo cuando alguien revise el aforo. */
+      salidas_automaticas: salidasAuto.map(x => x.zona || x.zona_id),
       ticket: { codigo: ticket.codigo, nombre: ticket.guest_nombre || 'Asistente', tipo: ticket.tipo?.nombre || 'General' },
       /* En una mesa, quién se movió y cuántos de los suyos quedan dentro: sin
          esto, el escáner enseña el nombre del titular las cuatro veces y quien
