@@ -151,14 +151,6 @@ app.use('/eventos/publicos/equipo', require('./routes/equipoTorneo.js'));
 app.use('/eventos/publicos', require('./routes/sesiones.js').publico);
 app.use('/eventos/publicos', require('./routes/legal.js').publico);
 app.use('/eventos/publicos', require('./routes/eventos.publicos.js'));
-/* Los recintos guardados. Van en la raíz y no bajo `/eventos` porque un recinto
-   no es de un evento: es de la cuenta, y se usa desde eventos que todavía no
-   existen.
- *
- * Y van DESPUÉS de las rutas públicas, no antes: este router autentica con
- * `router.use`, y montado en `/` por delante dejaría la web pública entera en
- * 401. Lo cazó `test/montaje.test.js` — que existe justo porque ya pasó. */
-app.use('/',                 require('./routes/recintos.js'));
 app.use('/me',               require('./routes/me.js'));
 app.use('/me',               require('./routes/integraciones.js'));
 app.use('/me',               require('./routes/sugerencias.js'));
@@ -172,17 +164,53 @@ app.use('/',                 require('./routes/webhooks.js'));
 app.use('/',                 require('./routes/push.js'));
 /* Promociones aplica auth POR RUTA y expone la validación pública de cupón
    (checkout anónimo) → debe ir aquí, antes del grupo con auth global.
-   Emails también usa auth por ruta (servicio de correo del evento). */
+
+   `emails.js` NO usa auth por ruta: hace `router.use(verifySupabaseJWT)` en su
+   línea 36. El comentario que decía lo contrario llevaba tiempo aquí y es lo
+   que lo dejó dentro del bloque «público», por delante de rutas públicas de
+   verdad. No tiene ninguna ruta pública, así que su sitio es el bloque del
+   final; se queda aquí porque moverlo no arregla nada y tocar el orden sin
+   necesidad es cómo se rompen estas cosas. Lo que sí importa es que nada
+   público se monte por detrás de él. */
 app.use('/',                 require('./routes/promociones.js'));
+/* La bolsa de empleo. Va aquí: la última de las que tienen rutas PÚBLICAS, y
+ * por delante de `emails.js`, que no tiene ninguna.
+ *
+ * Es un router mixto: declara tres rutas públicas —ver vacantes sin cuenta— y
+ * DESPUÉS hace `router.use(verifySupabaseJWT)` para las otras 21. Dentro del
+ * archivo el orden es correcto: lo declarado antes del guardia no pasa por él.
+ *
+ * Lo que no puede es ir por delante de otro router con rutas públicas, porque
+ * un `router.use` corre para TODA petición que entra al router, case o no con
+ * sus rutas. Estaba montado detrás de seis routers con auth global y le pasaba
+ * justo eso, al revés:
+ *
+ * Medido en producción: `GET /vacantes` y `/vacantes/roles` contestaban «Token
+ * requerido». Su propio comentario dice «una bolsa que exige registrarse para
+ * MIRAR no la encuentra nadie», y era exactamente lo que estaba pasando. */
+app.use('/',                 require('./routes/vacantes.js'));
 app.use('/',                 require('./routes/emails.js'));
 /* Routers con router.use(verifySupabaseJWT) GLOBAL montados en '/':
    van AL FINAL del grupo '/' para no bloquear lo público de arriba. */
+/* Los recintos guardados. Van en la raíz y no bajo `/eventos` porque un recinto
+   no es de un evento: es de la cuenta, y se usa desde eventos que todavía no
+   existen.
+ *
+ * Estaba 16 líneas más arriba, detrás de `/eventos/publicos` y por delante de
+ * `pagos.js`. Parecía bien —«después de las rutas públicas»— y no lo era: hay
+ * rutas públicas montadas en `/` DESPUÉS, dentro de `pagos`, `wompi`, `google`,
+ * `webhooks` y `push`. Este router autentica con `router.use`, así que se las
+ * tragaba todas.
+ *
+ * Medido contra producción: `POST /eventos/publicos/ticket/:codigo/reanudar-pago`
+ * —pública, del 5-sep— contestaba «Token requerido». Parecía un despliegue
+ * viejo y era esto: la ruta estaba desplegada y no se podía alcanzar. */
+app.use('/',                 require('./routes/recintos.js'));
 app.use('/',                 require('./routes/agente.js'));
 app.use('/',                 require('./routes/notificaciones.js'));
 app.use('/',                 require('./routes/solicitudes.js'));
 app.use('/',                 require('./routes/recompensas.js'));
 app.use('/',                 require('./routes/loyalty.js'));
-app.use('/',                 require('./routes/vacantes.js'));
 /* Buzon de sugerencias de dinamicas. Autentica POR RUTA, nunca con
    router.use: montado en '/', un guardia global aqui autenticaria toda
    peticion que pase por el router y dejaria la web publica en 401. */

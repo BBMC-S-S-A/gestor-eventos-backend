@@ -119,3 +119,61 @@ test('las conexiones del organizador tampoco autentican a nivel de router', () =
     'las rutas de conexiones sí tienen que exigir sesión',
   );
 });
+
+/* ── Y lo público que NO vive bajo `/eventos/publicos` ───────────────────
+ *
+ * La prueba de arriba mide el peligro contra la última línea que monta
+ * `/categorias` o `/eventos/publicos`. Eso deja fuera un caso entero, y el caso
+ * entero mordió:
+ *
+ * `pagos.js`, `wompi.js`, `google.js`, `webhooks.js` y `push.js` se montan en
+ * `/` DESPUÉS de ese punto y llevan **ocho rutas públicas** entre todos — el
+ * propio `index.js` lo dice en un comentario: «tienen rutas públicas (compra
+ * anónima, webhook MP, vapid-key) → van antes del bloque con auth global».
+ *
+ * `recintos.js` estaba montado en `/` entre medias. Autentica con `router.use`,
+ * así que se tragaba esas ocho.
+ *
+ * Medido contra producción:
+ * `POST /eventos/publicos/ticket/:codigo/reanudar-pago` —pública desde el
+ * 5-sep— contestaba «Token requerido». Pareció un despliegue viejo durante un
+ * rato; el `/health` del servidor decía que corría el commit del día anterior.
+ * La ruta estaba desplegada y no se podía alcanzar.
+ *
+ * El límite de verdad no es «dónde acaba `/eventos/publicos`»: es **el último
+ * router montado en `/` que declare alguna ruta pública**. */
+
+const RE_RUTA_PUBLICA = /\bpublica\(/;
+
+test('ningún router con auth global se monta antes de una ruta pública montada en "/"', () => {
+  const lineas = lineasIndex();
+
+  /* Dónde está de verdad el final de lo público: la última línea que monta en
+     `/` un router que declara rutas públicas. */
+  let ultimaPublica = -1;
+  const conAuthGlobal = [];
+
+  lineas.forEach((linea, i) => {
+    const m = linea.match(RE_MONTAJE_RAIZ);
+    if (!m) return;
+    const ruta = path.join(RAIZ, m[1]);
+    if (!fs.existsSync(ruta)) return;
+    const fuente = fs.readFileSync(ruta, 'utf8');
+
+    if (RE_RUTA_PUBLICA.test(fuente)) ultimaPublica = i;
+    const auth = fuente.match(RE_AUTH_ROUTER);
+    if (auth) conAuthGlobal.push({ linea: i, archivo: m[1], guardia: auth[1] });
+  });
+
+  assert.ok(ultimaPublica > 0,
+    'ya no reconozco ningún router con rutas públicas montado en "/": revisa la prueba');
+
+  const culpables = conAuthGlobal
+    .filter(x => x.linea < ultimaPublica)
+    .map(x => `index.js:${x.linea + 1} monta ${x.archivo}, que hace router.use(${x.guardia})`);
+
+  assert.deepEqual(culpables, [],
+    'Un router montado en "/" con router.use(auth) por delante de una ruta pública '
+    + 'montada también en "/" se traga esa ruta: contesta 401 y parece que no está '
+    + `desplegada. Muévelo al bloque del final. Culpables: ${culpables.join(' | ')}`);
+});
