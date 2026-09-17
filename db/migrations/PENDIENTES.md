@@ -1,57 +1,51 @@
 # Migraciones pendientes en Supabase
 
-**Quedan dos: la 0125 y la 0126.** Comprobado contra la base real el
-2026-09-17, preguntando por los objetos que cada una crea — no por lo que
-dijera este archivo, que decía «no queda ninguna» y no era verdad.
+**Queda media: la segunda mitad de la 0126.** Estado comprobado contra la base
+real el 2026-09-17, preguntando por los objetos, no por lo que diga este
+archivo — que antes decía «No queda ninguna» y era falso.
 
-> **No son las últimas: son dos salteadas.** La 0127 y la 0128, posteriores,
-> sí están aplicadas. Es decir, no es que la cola se quedara a medias — es que
-> estas dos se pasaron por alto y las de después siguieron. Por eso mirar sólo
-> el número más alto no sirve para saber qué falta.
+## Lo aplicado el 2026-09-17
 
-| Nº | Qué hace | Estado | Cómo se comprueba |
-|---|---|---|---|
-| 0125 | El movimiento de una boleta recuerda a qué puesto fue (`ticket_movimientos.puesto_id`) | ❌ **PENDIENTE** | `select count(*) from information_schema.columns where table_name='ticket_movimientos' and column_name='puesto_id'` → hoy 0 |
-| 0126 | Lo que incluye la credencial: `derechos`, `derecho_ventanas`, `derecho_consumos` | ❌ **PENDIENTE** | `select to_regclass('public.derechos')` → hoy `null` |
+| Nº | Qué | Estado |
+|---|---|---|
+| 0125 | `ticket_movimientos.puesto_id` + su índice parcial | ✅ aplicada |
+| 0126 · tablas | `derechos`, `derecho_ventanas`, `derecho_consumos`, sus índices y los dos únicos | ✅ aplicada |
+| 0126 · RLS | `enable row level security` en las tres | ✅ aplicada — **no venía en la migración**, se añadió |
 
-## Qué está roto mientras la 0126 no se aplique
+Las dos estaban escritas desde hacía días y nunca se habían corrido, mientras
+que la 0127 y la 0128 —posteriores— sí. No era una cola a medias: eran dos
+salteadas. Por eso mirar el número más alto no dice qué falta.
 
-**El sistema de refrigerios no puede funcionar.** El código ya está
-—`routes/derechos.js`, `lib/derechos.js`, y la pantalla en `CheckinTab.jsx`—
-y las tres tablas que necesita no existen. Cualquiera que intente configurar
-los refrigerios de un stand se va a encontrar un fallo sin explicación, porque
-el síntoma (una pantalla que no guarda) no se parece a la causa (una tabla que
-no está).
+## Lo que FALTA: el permiso `entregar`
 
-Esto es exactamente el modo de fallo contra el que se escribió este archivo.
-
-## Antes de aplicar la 0126: le falta la RLS
-
-La 0126 crea **tres tablas en el esquema `public` y no activa Row Level
-Security en ninguna**. En Supabase, toda tabla de `public` la publica
-PostgREST: sin RLS activada queda al alcance de la clave anónima, que es
-pública por definición.
-
-No es lo que hace el resto del proyecto. Comprobado el 2026-09-17: `tickets`,
-`zonas`, `ticket_types`, `ticket_puestos`, `networking_expositores` y
-`networking_citas` tienen todas RLS activada. `ticket_puestos` la tiene activa
-**con cero policies**, que es el patrón de este repo: la puerta cerrada, y el
-backend entrando con `service_role`, que se salta la RLS por diseño.
-
-Así que la 0126 se aplica **con este añadido delante**, no tal cual:
+La 0126 tiene una segunda mitad que no se aplicó: redefine
+`private.fn_roles_semilla()` para que el rol Administrador nazca con el permiso
+`entregar`, y luego se lo añade a los roles que ya existen:
 
 ```sql
-alter table public.derechos          enable row level security;
-alter table public.derecho_ventanas  enable row level security;
-alter table public.derecho_consumos  enable row level security;
+update public.event_roles r
+   set permissions = coalesce(
+         (select jsonb_agg(distinct p)
+            from jsonb_array_elements_text(r.permissions || '["entregar"]'::jsonb) p),
+         r.permissions)
+ where r.permissions ? 'editar_evento'
+   and not (r.permissions ? 'entregar');
 ```
 
-Sin policies, a propósito: nadie entra con la clave anónima, y el backend sigue
-entrando igual que a `ticket_puestos`. Si algún día algo tiene que leerse desde
-el navegador sin pasar por la API, se añade la policy de ese caso concreto —
-una por operación, no una `for all`.
+**Hoy hay 114 roles con `editar_evento` y sin `entregar`.** Mientras eso no
+corra, las tablas están pero nadie tiene permiso de entregar nada: los
+refrigerios siguen sin poder usarse, sólo que ahora el motivo es otro.
 
-## Cómo se comprueba que quedó aplicada
+Es un `update` sobre permisos de todos los eventos, así que conviene correrlo a
+la vista de alguien y no dentro de un lote. Comprobación después:
+
+```sql
+select count(*) from public.event_roles
+ where permissions ? 'editar_evento' and not (permissions ? 'entregar');
+-- tiene que dar 0
+```
+
+## Cómo se comprueba todo lo demás
 
 ```sql
 select to_regclass('public.derechos')         as t1,
@@ -61,11 +55,18 @@ select to_regclass('public.derechos')         as t1,
           where table_name='ticket_movimientos' and column_name='puesto_id') as c0125;
 ```
 
-Las tres tablas con nombre en vez de `null`, y `c0125 = 1`.
+Las tres tablas con nombre y `c0125 = 1`. Verificado el 2026-09-17.
+
+## Y lo que hace falta DESPUÉS
+
+La 0126 no enciende nada por sí sola: sin código que cree derechos, las tablas
+se quedan vacías. Lo que falta —endpoint de entrega, pantalla y reporte— está
+en `docs/DERECHOS.md`.
 
 ---
 
 ## Historial anterior
+
 
 
 **(Histórico — esta línea decía «No queda ninguna» y era falsa; ver arriba.)**
