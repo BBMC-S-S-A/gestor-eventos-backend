@@ -27,6 +27,7 @@ const { verifySupabaseJWT } = require('../middleware/auth.js');
 const { auditar } = require('../lib/auditar.js');
 const { assertPermiso } = require('../lib/acceso.js');
 const { verifyTicketQR } = require('../lib/qr.js');
+const { leerEscaneo } = require('../lib/leerEscaneo.js');
 const { horaDelEscaneo } = require('../lib/horaDeEscaneo.js');
 const D = require('../lib/derechos.js');
 const credenciales = require('../lib/credenciales.js');
@@ -244,7 +245,8 @@ router.delete('/:eventoId/ventanas/:ventanaId', exige(PERMS_CONFIG), async (req,
  * búsqueda por nombre — que existe porque siempre llega quien perdió el
  * teléfono, y si esa salida no es obvia el staff acaba entregando sin registrar
  * nada, que es peor. */
-async function resolverTitular({ eventoId, qr_token, codigo, puesto_id }) {
+async function resolverTitular({ eventoId, puesto_id, ...escaneo }) {
+  const { qr_token, codigo } = leerEscaneo(escaneo);
   if (qr_token) {
     const r = verifyTicketQR(qr_token);
     if (!r.ok) throw Object.assign(new Error('QR inválido.'), { http: 400, sound: 'error' });
