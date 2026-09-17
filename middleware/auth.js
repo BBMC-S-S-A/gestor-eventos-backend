@@ -29,6 +29,7 @@
    su emisión. Entonces se borra `porSupabase` y esto son diez líneas. */
 
 const supabase = require('../lib/supabase.js');
+const jwtSupabase = require('../lib/jwtSupabase.js');
 const config = require('../core/config');
 
 /* Se importa perezosamente para no arrastrar el módulo entero (y su Router de
@@ -50,7 +51,24 @@ function porNosotros(req) {
   return propia().verificar(req);
 }
 
-/* El camino viejo. Se deja intacto a propósito. */
+/* El token de Supabase, verificado en LOCAL con su clave pública.
+ *
+ * Mismo token y mismo objeto que abajo; lo que no hay es viaje de red. Medido
+ * en los registros del proyecto, `getUser()` estaba haciendo 105.655 llamadas
+ * en 24 horas —unos 3,2 millones al mes— para comprobar algo que el propio
+ * token ya trae firmado.
+ *
+ * Ver `lib/jwtSupabase.js` para el porqué del JWKS y para lo que esto cuesta:
+ * un token revocado antes de caducar sigue valiendo hasta que expire. */
+async function porSupabaseLocal(token) {
+  return jwtSupabase.usuarioDelToken(token);
+}
+
+/* El camino viejo. Se deja porque es la red de seguridad, no por inercia: si
+ * el JWKS no se puede traer, si el proyecto rota a una firma que no sabemos
+ * leer, o si aparece un token que no valida en local por un motivo legítimo,
+ * se pregunta como siempre y nadie se queda fuera. Cuesta una llamada; dejar a
+ * la gente sin entrar cuesta más. */
 async function porSupabase(token) {
   const { data, error } = await supabase.auth.getUser(token);
   if (error || !data?.user) return null;
@@ -63,6 +81,10 @@ async function verifySupabaseJWT(req, res, next) {
 
   const nuestro = porNosotros(req);
   if (nuestro) { req.user = nuestro; return next(); }
+
+  /* Primero el local, que no cuesta nada. El de red queda detrás, de respaldo. */
+  const enLocal = await porSupabaseLocal(token);
+  if (enLocal) { req.user = enLocal; return next(); }
 
   const suyo = await porSupabase(token);
   if (!suyo) return res.status(401).json({ error: 'Token inválido o expirado.' });
@@ -79,7 +101,7 @@ async function verifySupabaseJWTOptional(req, _res, next) {
   const nuestro = porNosotros(req);
   if (nuestro) { req.user = nuestro; return next(); }
 
-  req.user = await porSupabase(token);
+  req.user = (await porSupabaseLocal(token)) || (await porSupabase(token));
   next();
 }
 
