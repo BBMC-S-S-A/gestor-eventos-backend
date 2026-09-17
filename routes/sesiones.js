@@ -298,12 +298,17 @@ publico.post('/slug/:slug/sesiones/:sesionId/inscribir', async (req, res) => {
      del evento. El modo 'evento' se mantiene para los sub-eventos que ya venían
      comportándose así. */
   const campos = await camposDeSesion(evento.id, sesion);
-  const tipoParaForm = sesion.formulario_modo === 'evento'
-    ? (sesion.ticket_type_id || ticket?.ticket_type_id || null)
-    : null;
 
-  const falloForm = validarFormulario(campos, respuestas, tipoParaForm);
-  if (falloForm) return res.status(400).json({ error: falloForm });
+  /* En modo 'evento' NO se valida aquí. Ese formulario se llena al sacar la
+     boleta y el modal de inscripción no lo enseña —le dice a la persona «no
+     hace falta que escribas nada más»— así que `respuestas` llega vacío.
+     Validarlo contra eso rechazaba a todo el mundo en cuanto el formulario del
+     evento tenía un campo obligatorio: en FESTECH, «Fecha de nacimiento» dejó
+     sin poder apuntarse a PijaoTech a gente con su boleta en la mano. */
+  if (sesion.formulario_modo !== 'evento') {
+    const falloForm = validarFormulario(campos, respuestas, null);
+    if (falloForm) return res.status(400).json({ error: falloForm });
+  }
   const limpias = normalizarRespuestas(campos, respuestas);
 
   const fila = {

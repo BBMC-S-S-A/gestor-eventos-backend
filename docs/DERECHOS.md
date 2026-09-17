@@ -1,7 +1,12 @@
 # Derechos y consumos — Fase 1
 
-**Estado:** diseño, sin implementar. La migración `0126_lo_que_incluye_la_credencial.sql`
-es la única pieza escrita.
+**Estado:** implementado y en producción. Backend en `routes/derechos.js` y
+`lib/derechos.js`, frontend en `src/pages/events/tabs/DerechosTab.jsx`
+("Lo que incluye") y el modo "Entregar" de `CheckinTab.jsx` (escáner). Lo que
+falta hoy no es código: es crear los `derechos` concretos de cada evento
+(nombre, ventanas, `aplica_tipos`) desde esa pantalla — ver la sección
+"Qué falta decidir antes de implementar" más abajo, que sigue vigente para
+cada evento nuevo aunque el motor ya esté construido.
 
 ---
 

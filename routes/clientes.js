@@ -1230,9 +1230,18 @@ router.post('/:eventoId/reingreso', sesion('Lo opera quien está en la puerta: l
        id de zona O por su nombre: si no, un reingreso viejo se leería como
        "nunca entró" y la primera salida se registraría como entrada. */
     const ultimoDe = async (filtrar) => {
-      const { data } = await filtrar(
+      const { data, error } = await filtrar(
         supabase.from('ticket_movimientos').select('tipo, created_at').eq('ticket_id', ticket.id)
       ).order('created_at', { ascending: false }).limit(1).maybeSingle();
+      /* Antes esto no se comprobaba: un error de la consulta (RLS, columna
+         que falta, un timeout) se leía igual que "sin movimientos previos" y
+         caía al valor por defecto de más abajo —el estado de la boleta—, que
+         para cualquiera que ya haya hecho check-in es SIEMPRE 'usado'. El
+         resultado era que un fallo intermitente aquí no se notaba como error:
+         se notaba como que el botón de Reingreso, de ahí en adelante y para
+         esa boleta, sólo sabía marcar salida. Mejor un 400 explícito que un
+         aforo mentiroso. */
+      if (error) throw new Error(`No se pudo leer el último movimiento de la boleta: ${error.message}`);
       return data || null;
     };
     /* ── Una mesa va y viene por personas, no por boleta ──────────────────
