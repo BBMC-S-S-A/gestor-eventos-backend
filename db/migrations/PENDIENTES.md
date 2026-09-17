@@ -1,6 +1,85 @@
 # Migraciones pendientes en Supabase
 
-**No queda ninguna.**
+**No queda ninguna** — y esta vez está comprobado objeto por objeto contra la
+base real, no dicho de memoria. La última vez este archivo afirmaba lo mismo y
+había dos migraciones sin correr.
+
+## Lo aplicado el 2026-09-17
+
+| Nº | Qué | Estado |
+|---|---|---|
+| 0125 | `ticket_movimientos.puesto_id` + su índice parcial | ✅ |
+| 0126 · tablas | `derechos`, `derecho_ventanas`, `derecho_consumos`, índices y los dos únicos | ✅ |
+| 0126 · RLS | `enable row level security` en las tres | ✅ — **no venía en la migración**, se añadió |
+| 0126 · función | `private.fn_roles_semilla()` con `entregar` en Administrador | ✅ |
+| 0126 · roles | `entregar` añadido a los roles que ya existían | ✅ — 114 roles en 38 eventos |
+| 0129 | `networking_expositores.nit` + los comentarios de `nit` y `categoria_negocio` | ✅ |
+
+La 0125 y la 0126 llevaban días escritas y sin correr, mientras la 0127 y la
+0128 —posteriores— sí estaban aplicadas. No era una cola a medias: eran dos
+salteadas. **Mirar el número más alto no dice qué falta.**
+
+## La vuelta atrás del permiso `entregar`
+
+Antes del `update` se guardó la foto exacta de las 114 filas, porque había un
+rol que ya tenía `entregar` por su cuenta y un rollback a lo bruto se lo
+habría quitado:
+
+```sql
+update public.event_roles r set permissions = z.permissions
+  from public.zz_rollback_0126b_entregar z where z.id = r.id;
+drop table public.zz_rollback_0126b_entregar;
+```
+
+Esa tabla se puede borrar cuando el permiso lleve un tiempo funcionando.
+
+### Comprobación de que el `update` no se llevó nada por delante
+
+`jsonb_agg(distinct …)` **reconstruye el array**, así que el orden cambia y
+comparar los `jsonb` tal cual da 12 falsos positivos. Comparados como conjuntos
+ordenados, el resultado es limpio:
+
+```sql
+with cmp as (
+  select (select array_agg(x order by x) from jsonb_array_elements_text(z.permissions) x) as antes,
+         (select array_agg(x order by x) from jsonb_array_elements_text(r.permissions - 'entregar') x) as despues,
+         jsonb_array_length(z.permissions) n_antes, jsonb_array_length(r.permissions) n_despues
+    from public.event_roles r join public.zz_rollback_0126b_entregar z on z.id = r.id)
+select count(*) filter (where antes is distinct from despues) as perdio_o_gano_algo,
+       count(*) filter (where n_despues <> n_antes + 1)       as no_sumo_exactamente_uno
+  from cmp;
+-- 0 y 0. Los 114 sumaron exactamente un permiso y ninguno perdió nada.
+```
+
+## Cómo se comprueba todo
+
+```sql
+select to_regclass('public.derechos')         as t1,
+       to_regclass('public.derecho_ventanas') as t2,
+       to_regclass('public.derecho_consumos') as t3,
+       (select count(*) from information_schema.columns
+          where table_name='ticket_movimientos' and column_name='puesto_id') as c0125,
+       (select count(*) from public.event_roles
+          where permissions ? 'editar_evento' and not (permissions ? 'entregar')) as sin_entregar;
+```
+
+Las tres tablas con nombre, `c0125 = 1` y `sin_entregar = 0`. Verificado el
+2026-09-17.
+
+## Y lo que hace falta DESPUÉS
+
+La 0126 no enciende nada por sí sola: sin código que cree derechos, las tablas
+se quedan vacías. Lo que falta —endpoint de entrega, pantalla y reporte— está
+en `docs/DERECHOS.md`.
+
+---
+
+## Historial anterior
+
+
+
+
+**(Histórico — esta línea decía «No queda ninguna» y era falsa; ver arriba.)**
 
 > **El número 0103 estaba duplicado y ya no lo está.** El torneo de puntaje por
 > jurado nació como `0103_torneo_calificacion_jurado.sql`, con el número que ya
