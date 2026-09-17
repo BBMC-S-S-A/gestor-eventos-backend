@@ -231,9 +231,31 @@ router.get('/:eventoId/clientes', exige(PERMS_CLIENTES), async (req, res) => {
     const { data, count, error } = await query;
     if (error) return res.status(500).json({ error: error.message });
 
-    /* Stats agregados */
-    const { data: all } = await supabase
-      .from('tickets').select('estado, precio_pagado').eq('evento_id', eventoId);
+    /* Stats agregados, en páginas de mil.
+     *
+     * Esto se traía de una sola consulta sin `.range()`, y PostgREST corta ahí
+     * en 1.000 filas. El corte no da error: devuelve mil y se queda tan ancho.
+     * Como las stats se calculan recorriendo ese array, TODO evento con más de
+     * mil boletas mostraba exactamente 1.000 — visto en FESTECH IBAGUÉ, con
+     * `total: 1303` en la misma respuesta y `stats.total: 1000` al lado.
+     *
+     * Y es la pantalla de Asistentes: el número que mira quien organiza el día
+     * del evento para saber cuánta gente va. Congelado en una cifra redonda y
+     * creíble, que es la peor forma de estar mal.
+     *
+     * Mismo patrón que `/dinero`, más abajo en este archivo, que ya lo tenía
+     * resuelto. */
+    const all = [];
+    for (let desde = 0; desde < 50000; desde += 1000) {
+      const { data: pagina, error: ePag } = await supabase
+        .from('tickets').select('estado, precio_pagado')
+        .eq('evento_id', eventoId)
+        .order('created_at', { ascending: true })
+        .range(desde, desde + 999);
+      if (ePag) return res.status(500).json({ error: ePag.message });
+      all.push(...(pagina || []));
+      if (!pagina || pagina.length < 1000) break;
+    }
 
     const stats = (all || []).reduce((acc, t) => {
       acc.total++;
