@@ -13,6 +13,7 @@ había dos migraciones sin correr.
 | 0126 · RLS | `enable row level security` en las tres | ✅ — **no venía en la migración**, se añadió |
 | 0126 · función | `private.fn_roles_semilla()` con `entregar` en Administrador | ✅ |
 | 0126 · roles | `entregar` añadido a los roles que ya existían | ✅ — 114 roles en 38 eventos |
+| 0129 | `networking_expositores.nit` + los comentarios de `nit` y `categoria_negocio` | ✅ |
 
 La 0125 y la 0126 llevaban días escritas y sin correr, mientras la 0127 y la
 0128 —posteriores— sí estaban aplicadas. No era una cola a medias: eran dos
