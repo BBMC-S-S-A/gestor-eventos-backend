@@ -6,12 +6,14 @@
 # UN SOLO ERROR. Esto pregunta a la API —no a `main`— por señales que sólo
 # existen si el código nuevo está corriendo.
 #
-# Se preguntan LOS DOS servidores. La misma API vive en cPanel y en Render, se
-# despliegan por separado, y uno puede quedarse atrás sin que nadie lo note: la
-# respuesta útil no es «está desplegado», es «cuál no».
+# Desde el 17-sep hay UN servidor: cPanel. Render y Vercel se retiraron del
+# todo, y el host viejo contesta 503 — preguntarle seguía dando una lista de
+# «NO» que no eran fallos de despliegue sino un servidor que ya no existe. Un
+# comprobador que siempre dice que algo va mal deja de leerse, y entonces no
+# avisa el día que algo va mal de verdad.
 #
 #   bash scripts/comprobar-despliegue.sh
-#   API=https://otro.host bash scripts/comprobar-despliegue.sh   # sólo uno
+#   API=https://otro.host bash scripts/comprobar-despliegue.sh   # otro host
 #
 # Ninguna comprobación escribe nada.
 #
@@ -29,7 +31,7 @@
 # requerido». Esa diferencia es la prueba.
 set -u
 
-HOSTS="${API:-https://api.gestekeventost.dpdns.org https://gestor-eventos-backend-yx75.onrender.com}"
+HOSTS="${API:-https://api.gestekeventost.dpdns.org}"
 mal=0
 
 probar() {                       # probar <host> <qué> <url> <patrón> [método]
@@ -77,6 +79,5 @@ else
   echo "cPanel:  Git Version Control → Deploy HEAD Commit. Ojo al paso 3 del"
   echo "         .cpanel.yml: sin el restart de Passenger el código nuevo está"
   echo "         en disco y el proceso viejo sigue atendiendo."
-  echo "Render:  se despliega solo desde main; si está en rojo, mirar su log."
 fi
 exit "$mal"
