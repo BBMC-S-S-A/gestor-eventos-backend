@@ -14,6 +14,7 @@ había dos migraciones sin correr.
 | 0126 · función | `private.fn_roles_semilla()` con `entregar` en Administrador | ✅ |
 | 0126 · roles | `entregar` añadido a los roles que ya existían | ✅ — 114 roles en 38 eventos |
 | 0129 | `networking_expositores.nit` + los comentarios de `nit` y `categoria_negocio` | ✅ |
+| 0130 | Permiso `gestionar_zonas`: `fn_roles_semilla` y los roles que ya tenían `editar_pagina_publica` o `editar_evento`. Nació como `0129_las_zonas_en_los_permisos.sql` y se renumeró por chocar con la del NIT; se aplicó con ese nombre | ✅ |
 
 La 0125 y la 0126 llevaban días escritas y sin correr, mientras la 0127 y la
 0128 —posteriores— sí estaban aplicadas. No era una cola a medias: eran dos
