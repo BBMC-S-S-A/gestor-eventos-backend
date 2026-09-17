@@ -1,6 +1,74 @@
 # Migraciones pendientes en Supabase
 
-**No queda ninguna.**
+**Quedan dos: la 0125 y la 0126.** Comprobado contra la base real el
+2026-09-17, preguntando por los objetos que cada una crea — no por lo que
+dijera este archivo, que decía «no queda ninguna» y no era verdad.
+
+> **No son las últimas: son dos salteadas.** La 0127 y la 0128, posteriores,
+> sí están aplicadas. Es decir, no es que la cola se quedara a medias — es que
+> estas dos se pasaron por alto y las de después siguieron. Por eso mirar sólo
+> el número más alto no sirve para saber qué falta.
+
+| Nº | Qué hace | Estado | Cómo se comprueba |
+|---|---|---|---|
+| 0125 | El movimiento de una boleta recuerda a qué puesto fue (`ticket_movimientos.puesto_id`) | ❌ **PENDIENTE** | `select count(*) from information_schema.columns where table_name='ticket_movimientos' and column_name='puesto_id'` → hoy 0 |
+| 0126 | Lo que incluye la credencial: `derechos`, `derecho_ventanas`, `derecho_consumos` | ❌ **PENDIENTE** | `select to_regclass('public.derechos')` → hoy `null` |
+
+## Qué está roto mientras la 0126 no se aplique
+
+**El sistema de refrigerios no puede funcionar.** El código ya está
+—`routes/derechos.js`, `lib/derechos.js`, y la pantalla en `CheckinTab.jsx`—
+y las tres tablas que necesita no existen. Cualquiera que intente configurar
+los refrigerios de un stand se va a encontrar un fallo sin explicación, porque
+el síntoma (una pantalla que no guarda) no se parece a la causa (una tabla que
+no está).
+
+Esto es exactamente el modo de fallo contra el que se escribió este archivo.
+
+## Antes de aplicar la 0126: le falta la RLS
+
+La 0126 crea **tres tablas en el esquema `public` y no activa Row Level
+Security en ninguna**. En Supabase, toda tabla de `public` la publica
+PostgREST: sin RLS activada queda al alcance de la clave anónima, que es
+pública por definición.
+
+No es lo que hace el resto del proyecto. Comprobado el 2026-09-17: `tickets`,
+`zonas`, `ticket_types`, `ticket_puestos`, `networking_expositores` y
+`networking_citas` tienen todas RLS activada. `ticket_puestos` la tiene activa
+**con cero policies**, que es el patrón de este repo: la puerta cerrada, y el
+backend entrando con `service_role`, que se salta la RLS por diseño.
+
+Así que la 0126 se aplica **con este añadido delante**, no tal cual:
+
+```sql
+alter table public.derechos          enable row level security;
+alter table public.derecho_ventanas  enable row level security;
+alter table public.derecho_consumos  enable row level security;
+```
+
+Sin policies, a propósito: nadie entra con la clave anónima, y el backend sigue
+entrando igual que a `ticket_puestos`. Si algún día algo tiene que leerse desde
+el navegador sin pasar por la API, se añade la policy de ese caso concreto —
+una por operación, no una `for all`.
+
+## Cómo se comprueba que quedó aplicada
+
+```sql
+select to_regclass('public.derechos')         as t1,
+       to_regclass('public.derecho_ventanas') as t2,
+       to_regclass('public.derecho_consumos') as t3,
+       (select count(*) from information_schema.columns
+          where table_name='ticket_movimientos' and column_name='puesto_id') as c0125;
+```
+
+Las tres tablas con nombre en vez de `null`, y `c0125 = 1`.
+
+---
+
+## Historial anterior
+
+
+**(Histórico — esta línea decía «No queda ninguna» y era falsa; ver arriba.)**
 
 > **El número 0103 estaba duplicado y ya no lo está.** El torneo de puntaje por
 > jurado nació como `0103_torneo_calificacion_jurado.sql`, con el número que ya
