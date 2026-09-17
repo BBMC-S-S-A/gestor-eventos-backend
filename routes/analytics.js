@@ -14,6 +14,25 @@ function assertOwner(eventoId, userId) {
   return assertPermiso(eventoId, userId, PERMS_ANALYTICS, 'id, owner_id');
 }
 
+/* Trae TODAS las filas de una consulta, en páginas de mil.
+ *
+ * Sin esto, un `.select()` sin `.range()` se corta en el tope por defecto de
+ * PostgREST (1000 filas) y el corte es silencioso: no llega error, sólo un
+ * array incompleto. Con más de mil boletas o mil visitas registradas, el
+ * resumen del evento se congela en el número de la fila mil mientras el
+ * listado real —que sí pagina— sigue creciendo. Mismo patrón que ya se usa en
+ * `routes/clientes.js` (`/dinero`) y `lib/aforoZonas.js`. */
+async function traerTodo(armarConsulta) {
+  const filas = [];
+  for (let desde = 0; desde < 50000; desde += 1000) {
+    const { data, error } = await armarConsulta().range(desde, desde + 999);
+    if (error) throw new Error(error.message);
+    filas.push(...(data || []));
+    if (!data || data.length < 1000) break;
+  }
+  return filas;
+}
+
 /* GET /eventos/:eventoId/analytics — métricas agregadas del evento.
    Query: ?dias=30 (default). */
 router.get('/:eventoId/analytics', exige(PERMS_ANALYTICS), async (req, res) => {
@@ -24,22 +43,24 @@ router.get('/:eventoId/analytics', exige(PERMS_ANALYTICS), async (req, res) => {
     await assertOwner(eventoId, req.user.id);
     const desde = new Date(Date.now() - dias * 24 * 3600 * 1000).toISOString();
 
-    /* Visitas en el rango */
-    const { data: views, error: ev } = await supabase
+    /* Visitas en el rango. Paginado: un evento con más de mil visitas en la
+       ventana se cortaba en la fila mil sin avisar (tope por defecto de
+       PostgREST) y las métricas quedaban congeladas ahí para siempre. */
+    const views = await traerTodo(() => supabase
       .from('event_views')
       .select('visitor_hash, source, referrer, created_at')
       .eq('evento_id', eventoId)
       .gte('created_at', desde)
-      .order('created_at', { ascending: true });
-    if (ev) return res.status(500).json({ error: ev.message });
+      .order('created_at', { ascending: true }));
 
-    /* Tickets en el rango */
-    const { data: tickets, error: et } = await supabase
+    /* Tickets en el rango. Mismo motivo: un evento de más de mil boletas
+       (festech, por ejemplo) veía `tickets_total` clavado en 1000 aunque
+       siguieran entrando ventas. */
+    const tickets = await traerTodo(() => supabase
       .from('tickets')
       .select('id, estado, precio_pagado, created_at, checked_in_at, ticket_type_id, tipo:ticket_types!ticket_type_id(nombre)')
       .eq('evento_id', eventoId)
-      .gte('created_at', desde);
-    if (et) return res.status(500).json({ error: et.message });
+      .gte('created_at', desde));
 
     /* Agregados */
     const totalViews = views?.length || 0;
