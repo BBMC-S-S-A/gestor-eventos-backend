@@ -12,6 +12,7 @@ const { otorgarPuntos, otorgarBadge, reglasPuntosDeEvento } = require('../lib/ga
 const { dispatch } = require('../lib/webhooks.js');
 const { assertPermiso } = require('../lib/acceso.js');
 const { resolverTicket } = require('../lib/ticketLookup.js');
+const { leerEscaneo } = require('../lib/leerEscaneo.js');
 const puertaDePuestos = require('../lib/puertaDePuestos.js');
 const { notificar } = require('../lib/notificar.js');
 const { correrAutomatizaciones } = require('../lib/automatizaciones.js');
@@ -932,7 +933,8 @@ router.post('/:eventoId/clientes/importar', exige(PERMS_CLIENTES), async (req, r
    Owner siempre puede. Miembros del equipo necesitan permiso 'checkin'. */
 router.post('/:eventoId/checkin', sesion('Lo opera quien está en la puerta: la ruta comprueba el permiso `checkin` sobre el rol del miembro, no un permiso de edición del evento.'), async (req, res) => {
   const { eventoId } = req.params;
-  const { qr_token, codigo, acceso_id, at } = req.body;
+  const { acceso_id, at } = req.body;
+  const { qr_token, codigo } = leerEscaneo(req.body);
   if (!qr_token && !codigo) return res.status(400).json({ error: 'qr_token o codigo requerido.' });
   /* `at` (opcional): la hora REAL del escaneo cuando viene de la cola sin
      conexión. La validación vive en `lib/horaDeEscaneo.js`, compartida con la
@@ -1202,7 +1204,8 @@ router.post('/:eventoId/checkin', sesion('Lo opera quien está en la puerta: la 
    Sin `tipo`, alterna según el último estado (global o de esa zona). */
 router.post('/:eventoId/reingreso', sesion('Lo opera quien está en la puerta: la ruta comprueba el permiso `checkin` sobre el rol del miembro, no un permiso de edición del evento.'), async (req, res) => {
   const { eventoId } = req.params;
-  const { qr_token, codigo, tipo, acceso_id, zona_id } = req.body || {};
+  const { tipo, acceso_id, zona_id } = req.body || {};
+  const { qr_token, codigo } = leerEscaneo(req.body || {});
   try {
     const ev = await assertCheckinAccess(eventoId, req.user.id);
     /* `resolverTicket` ya rechaza un QR de puesto rotado por una transferencia
