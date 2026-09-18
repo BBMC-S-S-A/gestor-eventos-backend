@@ -759,9 +759,12 @@ async function resolverFichaExpositor(codigo) {
     .select('id, evento_id, estado, guest_nombre, guest_email, ticket_type_id, respuestas, tipo:ticket_types!ticket_type_id(nombre, es_expositor)')
     .eq('codigo', cod).maybeSingle();
   if (!ticket) return { error: 'Boleta no encontrada.' };
-  if (!ticket.tipo?.es_expositor) return { error: 'Esta boleta no es de expositor.' };
   const { data: ficha } = await supabase
     .from('networking_expositores').select('*').eq('ticket_id', ticket.id).maybeSingle();
+  /* Una boleta normal también tiene ficha si su dueño se inscribió él mismo
+     en la rueda (POST /slug/:slug/rueda/inscribir). Lo que no se admite es
+     una boleta normal SIN ficha: ahí no hay nada suyo que editar. */
+  if (!ticket.tipo?.es_expositor && !ficha) return { error: 'Esta boleta no es de expositor.' };
   return { ticket, ficha };
 }
 
@@ -1080,11 +1083,28 @@ router.get('/expositor/:codigo/citas', async (req, res) => {
   const { data: evento } = await supabase
     .from('eventos').select('id, slug, titulo, timezone').eq('id', ticket.evento_id).maybeSingle();
 
+  /* Quien vende no tiene mesa: sus citas son las que reservó en las mesas de
+     los compradores, con el correo de su boleta. */
+  let reservadas = [];
+  if (ficha.rol === 'vendedor' && ticket.guest_email) {
+    const { data: rs, error: eR } = await supabase
+      .from('networking_citas')
+      .select('id, estado, horario:networking_horarios!horario_id(inicio, fin, mesa:networking_expositores!expositor_id(nombre, stand))')
+      .eq('evento_id', ticket.evento_id)
+      .ilike('guest_email', ticket.guest_email)
+      .in('estado', ESTADOS_EN_AGENDA);
+    if (eR) return res.status(500).json({ error: eR.message });
+    reservadas = (rs || [])
+      .map(c => ({ id: c.id, estado: c.estado, inicio: c.horario?.inicio, fin: c.horario?.fin, mesa: c.horario?.mesa?.nombre, stand: c.horario?.mesa?.stand }))
+      .sort((a, b) => String(a.inicio).localeCompare(String(b.inicio)));
+  }
+
   res.json({
-    expositor: { id: ficha.id, nombre: ficha.nombre, stand: ficha.stand },
+    expositor: { id: ficha.id, nombre: ficha.nombre, stand: ficha.stand, rol: ficha.rol },
     evento,
     resumen: resumenDeAgenda(agenda),
     agenda,
+    reservadas,
   });
 });
 
@@ -1150,6 +1170,78 @@ router.get('/slug/:slug', recordarParaAnonimos(paginaPublica,
   (req) => `pagina|${req.params.slug}|${req.query.seccion ?? ''}`,
   (cuerpo) => ['publicado', 'cancelado'].includes(cuerpo?.evento?.estado)),
 async (req, res) => {
+/* POST /eventos/publicos/slug/:slug/rueda/inscribir
+ *
+ * Quien ya tiene boleta se da de alta en la rueda de negocios él mismo, como
+ * comprador o vendedor, con el código de su boleta.
+ *
+ * ── Por qué el código y no el correo ─────────────────────────────────────
+ *
+ * El correo de otra persona lo sabe cualquiera; el código sólo lo tiene quien
+ * recibió la boleta (va impreso en la escarapela y en el correo). Es la misma
+ * credencial con la que una empresa edita su ficha de stand.
+ *
+ * Una boleta, una ficha: si ya se inscribió se le devuelve la que tiene
+ * (`ya: true`) y el papel no se cambia desde aquí — cambiarse de lado en una
+ * rueda ya armada es decisión de quien la organiza. */
+const CAMPOS_INSCRIPCION = ['nombre', 'nit', 'categoria_negocio', 'descripcion', 'contacto_telefono', 'sitio_web'];
+
+router.post('/slug/:slug/rueda/inscribir', authLimiter, async (req, res) => {
+  const cod = String(req.body?.codigo || '').toUpperCase().trim();
+  const rol = req.body?.rol;
+  if (cod.length < 4) return res.status(400).json({ error: 'Escribe el código de tu boleta.' });
+  if (!['comprador', 'vendedor'].includes(rol)) return res.status(400).json({ error: 'Elige si vienes a comprar o a vender.' });
+  const nombre = String(req.body?.nombre || '').trim();
+  if (!nombre) return res.status(400).json({ error: 'El nombre de la empresa es obligatorio.' });
+
+  const { data: evento } = await supabase
+    .from('eventos').select('id, estado, deleted_at').eq('slug', req.params.slug).maybeSingle();
+  if (!evento || evento.deleted_at || evento.estado !== 'publicado') {
+    return res.status(404).json({ error: 'Este evento no existe o no está publicado.' });
+  }
+
+  const { data: ticket } = await supabase
+    .from('tickets').select('id, evento_id, estado, guest_nombre, guest_email')
+    .eq('codigo', cod).eq('evento_id', evento.id).maybeSingle();
+  /* Mismo mensaje para «no existe» y «es de otro evento»: distinguirlos le
+     diría a quien prueba códigos cuáles son boletas de verdad. */
+  if (!ticket) return res.status(404).json({ error: 'No encontramos esa boleta en este evento.' });
+  if (['invalido', 'reembolsado', 'cancelado'].includes(ticket.estado)) {
+    return res.status(409).json({ error: 'Esa boleta no está activa.' });
+  }
+
+  const { data: ya } = await supabase
+    .from('networking_expositores').select('id, nombre, rol').eq('ticket_id', ticket.id).maybeSingle();
+  if (ya) return res.json({ ya: true, ficha: ya, codigo: cod });
+
+  const fila = {
+    evento_id: evento.id, ticket_id: ticket.id, rol, activo: true,
+    estado_ficha: 'completa', tipo_persona: 'empresa',
+    contacto_nombre: ticket.guest_nombre || null,
+    contacto_email: ticket.guest_email || null,
+  };
+  for (const k of CAMPOS_INSCRIPCION) {
+    const v = String(req.body?.[k] ?? '').trim();
+    if (v) fila[k] = v.slice(0, k === 'descripcion' ? 2000 : 200);
+  }
+  fila.nombre = nombre.slice(0, 200);
+
+  const { data, error } = await supabase
+    .from('networking_expositores').insert(fila).select('id, nombre, rol').single();
+  if (error) {
+    /* Dos pestañas a la vez: la segunda choca con la única por ticket_id. */
+    if (error.code === '23505') {
+      const { data: otra } = await supabase
+        .from('networking_expositores').select('id, nombre, rol').eq('ticket_id', ticket.id).maybeSingle();
+      return res.json({ ya: true, ficha: otra, codigo: cod });
+    }
+    return res.status(500).json({ error: error.message });
+  }
+  res.status(201).json({ ya: false, ficha: data, codigo: cod });
+});
+
+/* GET /eventos/publicos/slug/:slug */
+router.get('/slug/:slug', async (req, res) => {
   const { slug } = req.params;
 
   const { data: evento, error } = await supabase
