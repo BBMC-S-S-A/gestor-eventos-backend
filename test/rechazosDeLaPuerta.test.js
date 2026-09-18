@@ -7,7 +7,7 @@ const SRC = fs.readFileSync(path.join(__dirname, '..', 'routes', 'clientes.js'),
 
 test('los dos «ya fue usada» de la puerta dejan constancia', () => {
   const avisos = SRC.split("error: 'Esta boleta ya fue usada.'").length - 1;
-  const anotados = (SRC.match(/anotarRechazo\(ticket,/g) || []).length;
+  const anotados = (SRC.match(/ anotarRechazo\(ticket, req/g) || []).length;
   assert.equal(anotados, avisos, 'un camino que rechaza sin anotarlo vuelve a esconder los repetidos');
 });
 
