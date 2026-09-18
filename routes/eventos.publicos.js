@@ -1161,15 +1161,6 @@ function recordarParaAnonimos(memoria, claveDe, sePuede = () => true) {
   };
 }
 
-/* GET /eventos/publicos/slug/:slug
- *
- * Con 20 s de memoria para visitantes SIN sesión cuando la respuesta es la
- * misma para todos: evento publicado o cancelado. Ver `lib/memoriaCorta.js`. */
-const paginaPublica = memoriaCorta({ ms: 20 * 1000 });
-router.get('/slug/:slug', recordarParaAnonimos(paginaPublica,
-  (req) => `pagina|${req.params.slug}|${req.query.seccion ?? ''}`,
-  (cuerpo) => ['publicado', 'cancelado'].includes(cuerpo?.evento?.estado)),
-async (req, res) => {
 /* POST /eventos/publicos/slug/:slug/rueda/inscribir
  *
  * Quien ya tiene boleta se da de alta en la rueda de negocios él mismo, como
@@ -1240,8 +1231,15 @@ router.post('/slug/:slug/rueda/inscribir', authLimiter, async (req, res) => {
   res.status(201).json({ ya: false, ficha: data, codigo: cod });
 });
 
-/* GET /eventos/publicos/slug/:slug */
-router.get('/slug/:slug', async (req, res) => {
+/* GET /eventos/publicos/slug/:slug
+ *
+ * Con 20 s de memoria para visitantes SIN sesión cuando la respuesta es la
+ * misma para todos: evento publicado o cancelado. Ver `lib/memoriaCorta.js`. */
+const paginaPublica = memoriaCorta({ ms: 20 * 1000 });
+router.get('/slug/:slug', recordarParaAnonimos(paginaPublica,
+  (req) => `pagina|${req.params.slug}|${req.query.seccion ?? ''}`,
+  (cuerpo) => ['publicado', 'cancelado'].includes(cuerpo?.evento?.estado)),
+async (req, res) => {
   const { slug } = req.params;
 
   const { data: evento, error } = await supabase
