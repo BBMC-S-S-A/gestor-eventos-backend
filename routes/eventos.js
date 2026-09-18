@@ -6,6 +6,8 @@ const { slugify, uniqueEventoSlug } = require('../lib/slug.js');
 const { otorgarBadge } = require('../lib/gamificacion.js');
 const { auditar } = require('../lib/auditar.js');
 const { leerCampos, guardarCampos, catalogoDeFormulario } = require('../lib/guardarCampos.js');
+const { opcionesParaElegir, camposElegidos } = require('../lib/tarjetaContacto.js');
+const { camposDelEvento } = require('../lib/formularioCampos.js');
 const { tramoPedido, datosDelTramo, filtrarPorTexto } = require('../lib/tramoDeLista.js');
 const { LLAVES_ESTRECHAS, llavesDePageJson, recortarPageJson } = require('../lib/quePuedeEditar.js');
 const { loQueDeVerdadCambia } = require('../lib/mismoValor.js');
@@ -892,6 +894,29 @@ router.delete('/:id/padron', exige(PERMS_PADRON), async (req, res) => {
 });
 
 /* GET /eventos/:id/padron/estado — cuántas filas hay, para la pantalla. */
+/* GET /eventos/:id/tarjeta-contacto — qué se puede compartir al escanear.
+ *
+ * Contesta con la MISMA regla que decide qué se publica
+ * (`lib/tarjetaContacto.js`): las opciones que se pueden marcar, y las
+ * preguntas del formulario que no, cada una con su etiqueta. Si el panel
+ * calculara esto por su cuenta, un día ofrecería una casilla que el servidor
+ * luego ignora —o peor, al revés—. */
+router.get('/:id/tarjeta-contacto', exige(['gestionar_acreditacion', 'editar_evento']), async (req, res) => {
+  try {
+    const campos = await camposDelEvento(req.params.id, { columnas: 'id, etiqueta, tipo, sensible' });
+    const { data: ev } = await supabase.from('eventos').select('page_json').eq('id', req.params.id).maybeSingle();
+    const config = ev?.page_json?.tarjeta_contacto || {};
+    const { permitidas, bloqueadas } = opcionesParaElegir(campos);
+    res.json({
+      permitidas,
+      bloqueadas,
+      elegidos: camposElegidos(config, campos).map(c => c.id),
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 router.get('/:id/padron/estado', exige(PERMS_PADRON), async (req, res) => {
   const permiso = await puedeEditarEvento(req, req.params.id);
   if (!permiso.ok) return res.status(permiso.status).json({ error: permiso.error });

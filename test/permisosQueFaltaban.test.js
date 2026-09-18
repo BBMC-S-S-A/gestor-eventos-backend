@@ -66,8 +66,10 @@ test('cada permiso estrecho abre su propia llave, no la del vecino', () => {
   /* Lo que la adivinanza vieja no podía distinguir. */
   const { llavesDePageJson } = require('../lib/quePuedeEditar.js');
   assert.deepEqual([...llavesDePageJson(new Set(['gestionar_documentos']))], ['documentos']);
+  /* `tarjeta_contacto` es parte del carné: qué datos enseña al escanearlo lo
+     decide quien lo diseña. */
   assert.deepEqual([...llavesDePageJson(new Set(['gestionar_acreditacion']))].sort(),
-    ['credenciales', 'puntos', 'wallet']);
+    ['credenciales', 'puntos', 'tarjeta_contacto', 'wallet']);
   /* Y los dos amplios siguen abriéndolo entero: `null` es «todas». */
   for (const p of ['editar_evento', 'editar_pagina_publica', '*']) {
     assert.equal(llavesDePageJson(new Set([p])), null, `${p} dejó de abrir page_json entero`);
