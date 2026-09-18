@@ -74,8 +74,15 @@ test('la boleta se marca «usada» con cerradura, no con un `if` previo', () => 
      entere. Y de paso, dos ingresos contados y los puntos de asistencia
      pagados dos veces. */
   const src = fs.readFileSync(path.join(__dirname, '..', 'routes', 'clientes.js'), 'utf8');
-  assert.match(src, /\.eq\('id', ticket\.id\)\s*\n\s*\.neq\('estado', 'usado'\)/,
+  /* Desde que un evento puede durar tres días hay DOS cerraduras, y las dos
+     tienen que seguir ahí: el primer día compara contra el estado, y el día
+     nuevo —cuando la boleta ya está «usada» desde ayer— compara contra la
+     fecha exacta que se acaba de leer. Sin la segunda, dos puertas escaneando
+     el mismo QR el día 2 lo dejarían pasar las dos. */
+  assert.match(src, /escritura\.neq\('estado', 'usado'\)/,
     'el check-in volvió a marcar «usada» sin condición: dos escáneres a la vez dejarían entrar dos veces');
+  assert.match(src, /escritura\.eq\('checked_in_at', ticket\.checked_in_at\)/,
+    'la entrada de un día nuevo se escribe sin comparar contra lo leído: dos puertas a la vez entrarían las dos');
   assert.match(src, /if \(!marcadas \|\| marcadas\.length === 0\) \{/,
     'no se mira si el update tocó alguna fila');
   assert.match(src, /ya_usada: true,[\s\S]{0,200}\}\);\s*\n\s*\}\s*\n\s*const updated = marcadas\[0\]/,

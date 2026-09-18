@@ -69,7 +69,7 @@ function assertOwner(eventoId, userId, perms = PERMS_CLIENTES) {
 /* Verifica que el usuario es owner O miembro con permiso 'checkin'. */
 async function assertCheckinAccess(eventoId, userId) {
   const { data: ev } = await supabase
-    .from('eventos').select('id, owner_id').eq('id', eventoId).maybeSingle();
+    .from('eventos').select('id, owner_id, timezone').eq('id', eventoId).maybeSingle();
   if (!ev) throw new Error('Evento no encontrado.');
   if (ev.owner_id === userId) return ev;
 
@@ -192,9 +192,19 @@ function leerCursor(cursor) {
   return { created_at: `${m[1]}T${m[2]}Z`, id };
 }
 
+/* Una fecha de corte para «registrados desde». Se valida antes de llegar a la
+   consulta, y si no cuadra se ignora: una lista completa de más se nota y se
+   arregla mirando; una lista vacía por una fecha mal escrita parece que no hay
+   nadie registrado. */
+function fechaValida(v) {
+  if (!v) return null;
+  const t = new Date(String(v));
+  return Number.isNaN(t.getTime()) ? null : t.toISOString();
+}
+
 router.get('/:eventoId/clientes', exige(PERMS_CLIENTES), async (req, res) => {
   const { eventoId } = req.params;
-  const { q, estado, ticket_type_id, cursor } = req.query;
+  const { q, estado, ticket_type_id, cursor, impresa, desde } = req.query;
   /* Cuántas y cuál página, saneadas.
    *
    * Antes se hacía `(Number(page) - 1) * Number(limit)` con lo que llegara: un
@@ -223,6 +233,7 @@ router.get('/:eventoId/clientes', exige(PERMS_CLIENTES), async (req, res) => {
          escarapela impresa NO pasaba el control. */
       .select(`
         id, codigo, qr_token, estado, precio_pagado, pagado_at, checked_in_at, zona_usada, acceso, created_at,
+        escarapela_impresa_at,
         guest_email, guest_nombre, respuestas,
         usuario:profiles!user_id(id, nombre, email, avatar_url),
         tipo:ticket_types!ticket_type_id${unido}(id, nombre, precio, currency)
@@ -267,6 +278,14 @@ router.get('/:eventoId/clientes', exige(PERMS_CLIENTES), async (req, res) => {
       query = query.eq('estado', estado);
     }
     if (ticket_type_id) query = query.eq('ticket_type_id', ticket_type_id);
+    /* «A quién le falta la escarapela» y «quién se registró hoy» son las dos
+       preguntas de la puerta. Se contestan en el servidor y no recortando la
+       lista en el navegador: así la pantalla puede pedir sólo lo que va a
+       enseñar en vez de traerse el evento entero. */
+    if (impresa === 'no') query = query.is('escarapela_impresa_at', null);
+    else if (impresa === 'si') query = query.not('escarapela_impresa_at', 'is', null);
+    const desdeCuando = fechaValida(desde);
+    if (desdeCuando) query = query.gte('created_at', desdeCuando);
     /* Nombre, correo o código, en una sola caja: quien busca a alguien no sabe
        de antemano por cuál de los tres lo va a encontrar. Por palabras, no por
        trozo literal: «Pérez, Juan» tiene que encontrar a «Juan Pérez». */
@@ -803,6 +822,53 @@ router.post('/:eventoId/clientes/:ticketId/reenviar', exige(PERMS_CLIENTES), asy
   }
 });
 
+/* POST /eventos/:eventoId/clientes/escarapelas-impresas — marcar impresas.
+ *
+ * Lo llama la pantalla de la etiquetadora al mandar una tanda a la impresora.
+ * Es lo que permite contestar «a quién le falta» cuando hay dos estaciones
+ * imprimiendo a la vez: guardado en la boleta y no en el navegador de cada
+ * una, porque si no, cada mostrador tendría su propia respuesta.
+ *
+ * Va con el permiso de la PUERTA (`checkin`), no con el de clientes: quien
+ * imprime es quien está en el mostrador.
+ *
+ * `.is('escarapela_impresa_at', null)` dentro del propio update: la primera
+ * impresión es la que cuenta. Reimprimir una escarapela rota no debe reescribir
+ * la hora ni el nombre de quien la imprimió la primera vez — eso es justo lo
+ * que después se mira para saber si alguien pasó dos veces por el mostrador.
+ * Para eso está `reimprimir: true`, que lo dice a propósito. */
+router.post('/:eventoId/clientes/escarapelas-impresas', sesion('Lo opera quien está en el mostrador de acreditación: la ruta comprueba el permiso `checkin` sobre el rol del miembro.'), async (req, res) => {
+  const { eventoId } = req.params;
+  const ids = Array.isArray(req.body?.ids) ? req.body.ids.filter(x => UUID.test(String(x))) : [];
+  const reimprimir = req.body?.reimprimir === true;
+  if (!ids.length) return res.status(400).json({ error: 'Sin boletas que marcar.' });
+  /* Un tope por petición: la pantalla manda lo que se acaba de imprimir, y una
+     lista de diez mil ids es un error de quien llama, no una tanda. */
+  if (ids.length > 500) return res.status(400).json({ error: 'Demasiadas boletas de una vez (máximo 500).' });
+
+  try {
+    await assertCheckinAccess(eventoId, req.user.id);
+    let q = supabase
+      .from('tickets')
+      .update({ escarapela_impresa_at: new Date().toISOString(), escarapela_impresa_por: req.user.id })
+      .eq('evento_id', eventoId)
+      .in('id', ids);
+    if (!reimprimir) q = q.is('escarapela_impresa_at', null);
+    const { data, error } = await q.select('id');
+    if (error) {
+      /* Sin la 0132 aplicada la columna no existe. Se dice, y no se tumba la
+         impresión: lo que importa es que la escarapela salga. */
+      if (/escarapela_impresa_at/.test(error.message || '')) {
+        return res.status(503).json({ error: 'Falta aplicar la migración 0132: todavía no se puede llevar la cuenta de las escarapelas impresas.' });
+      }
+      return res.status(500).json({ error: error.message });
+    }
+    res.json({ ok: true, marcadas: (data || []).length, ya_estaban: ids.length - (data || []).length });
+  } catch (e) {
+    res.status(e.message === 'No autorizado.' ? 403 : 400).json({ error: e.message });
+  }
+});
+
 router.post('/:eventoId/clientes/importar', exige(PERMS_CLIENTES), async (req, res) => {
   const { eventoId } = req.params;
   const { ticket_type_id, marcar_pagado, rows } = req.body;
@@ -983,6 +1049,32 @@ router.post('/:eventoId/clientes/importar', exige(PERMS_CLIENTES), async (req, r
   }
 });
 
+/* ── Un evento de tres días son tres entradas, no una ────────────────────
+ *
+ * El check-in marcaba la boleta `usado` y de ahí en adelante contestaba «esta
+ * boleta ya fue usada» para siempre. En un evento de un día es lo correcto y
+ * es lo que impide que una entrada pase dos veces. En uno de TRES —FESTECH,
+ * 17 al 19— significa que el día 2 por la mañana la puerta rechaza a todo el
+ * mundo con su QR bueno en la mano.
+ *
+ * La regla queda dicha por día: repetir HOY sigue siendo «ya fue usada»; el
+ * mismo QR MAÑANA vuelve a abrir y queda registrado como la entrada de ese
+ * día. Un evento de un solo día no nota ningún cambio, porque nunca llega a
+ * haber un check-in de un día anterior.
+ *
+ * El día es el del RECINTO, no el del servidor: con `timezone` del evento, las
+ * once de la noche en Ibagué no son ya el día siguiente. */
+function diaDelEvento(cuando, timezone) {
+  try {
+    return new Intl.DateTimeFormat('en-CA', {
+      timeZone: timezone || 'America/Bogota',
+      year: 'numeric', month: '2-digit', day: '2-digit',
+    }).format(new Date(cuando));
+  } catch {
+    return new Date(cuando).toISOString().slice(0, 10);
+  }
+}
+
 /* POST /eventos/:eventoId/checkin — validar QR o código y marcar 'usado'.
    Body: { qr_token } o { codigo }
    Owner siempre puede. Miembros del equipo necesitan permiso 'checkin'. */
@@ -1051,7 +1143,13 @@ router.post('/:eventoId/checkin', sesion('Lo opera quien está en la puerta: la 
        el recuento de puestos, no el estado de la boleta. */
     const losPuestos = await puertaDePuestos.puestosDe(ticket.id);
 
-    if (losPuestos.length <= 1 && ticket.estado === 'usado') {
+    /* ¿La entrada que ya tiene esta boleta es de HOY o de otro día? Ver
+       `diaDelEvento`: en un evento de varios días, la de ayer no bloquea. */
+    const hoyDelEvento = diaDelEvento(checkinAt, evCtx?.timezone);
+    const entroOtroDia = Boolean(ticket.checked_in_at)
+      && diaDelEvento(ticket.checked_in_at, evCtx?.timezone) !== hoyDelEvento;
+
+    if (losPuestos.length <= 1 && ticket.estado === 'usado' && !entroOtroDia) {
       return res.status(409).json({
         error: 'Esta boleta ya fue usada.',
         ticket,
@@ -1169,11 +1267,29 @@ router.post('/:eventoId/checkin', sesion('Lo opera quien está en la puerta: la 
      * escribir son una sola operación en la base: el segundo escaneo no
      * encuentra fila y cae al mismo 409 de «ya fue usada» que habría visto si
      * hubiera llegado un segundo después. */
-    const { data: marcadas, error: e2 } = await supabase
+    /* La cerradura, con los días dentro.
+     *
+     * En el día 1 sigue siendo `.neq('estado','usado')`: comparar y escribir en
+     * una sola operación es lo que impide que el mismo QR entre dos veces por
+     * dos puertas a la vez.
+     *
+     * En un día nuevo esa condición no vale —la boleta YA está `usado`— así que
+     * la cerradura pasa a ser la fecha: sólo se escribe si la entrada guardada
+     * sigue siendo la de un día anterior. Dos escaneos simultáneos del día 2:
+     * el primero deja `checked_in_at` de hoy, y el segundo ya no encuentra
+     * fila y cae en el mismo 409 de siempre. */
+    let escritura = supabase
       .from('tickets')
       .update({ estado: 'usado', checked_in_at: checkinAt, acceso: puerta?.nombre || null })
-      .eq('id', ticket.id)
-      .neq('estado', 'usado')
+      .eq('id', ticket.id);
+    escritura = entroOtroDia
+      /* Comparar contra la fecha EXACTA que se leyó hace un momento: si otra
+         puerta la cambió entretanto, aquí ya no cuadra y no se escribe. Es la
+         misma idea que `.neq('estado','usado')`, dicha con el dato que en un
+         día nuevo sí distingue. */
+      ? escritura.eq('checked_in_at', ticket.checked_in_at)
+      : escritura.neq('estado', 'usado');
+    const { data: marcadas, error: e2 } = await escritura
       .select(`*, tipo:ticket_types!ticket_type_id(nombre)`);
     if (e2) return res.status(500).json({ error: e2.message });
 
@@ -1240,6 +1356,10 @@ router.post('/:eventoId/checkin', sesion('Lo opera quien está en la puerta: la 
 
     res.json({
       ok: true, ticket: updated, advertencia, sound: 'ok',
+      /* Para que la puerta lea «entró otra vez, es el día 2» y no dude de si
+         acaba de dejar pasar una boleta repetida. */
+      nuevo_dia: entroOtroDia || undefined,
+      entrada_anterior: entroOtroDia ? ticket.checked_in_at : undefined,
       /* Nombre, documento y foto para comparar con la cédula. En una boleta
          normal casi todo va en `null` y la pantalla no enseña nada de más; en
          una credencial de montaje es la comprobación de verdad — la que no
