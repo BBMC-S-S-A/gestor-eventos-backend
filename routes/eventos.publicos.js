@@ -6,6 +6,7 @@ const { enlaceBoleta } = require('../lib/enlacePublico.js');
 const { ocupacion, zonasDelEvento, agendaPorZona } = require('../lib/aforoZonas.js');
 const { saldoDeTicket, recompensasDisponibles } = require('../lib/saldoTicket.js');
 const { verifySupabaseJWTOptional } = require('../middleware/auth.js');
+const { memoriaCorta } = require('../lib/memoriaCorta.js');
 const { signTicketQR, verifyTicketQR } = require('../lib/qr.js');
 const { leerEscaneo } = require('../lib/leerEscaneo.js');
 const { emitirPuestos, modoDelTipo } = require('../lib/emitirPuestos.js');
@@ -1137,6 +1138,29 @@ router.put('/expositor/:codigo', async (req, res) => {
   res.json({ ficha: data });
 });
 
+
+/* Middleware: sirve de `memoria` la respuesta a un visitante SIN sesión, y
+ * guarda las respuestas 200 que `sePuede(cuerpo)` acepte.
+ *
+ * Con sesión, siempre fresco: es el organizador revisando lo que acaba de
+ * guardar (o su equipo), y a él un retraso de 20 s le parece un fallo; además
+ * su respuesta puede depender de quién es (el borrador que sólo ve el dueño).
+ * La memoria es para los visitantes anónimos, que son quienes se registran. */
+function recordarParaAnonimos(memoria, claveDe, sePuede = () => true) {
+  return (req, res, next) => {
+    if (req.headers.authorization) return next();
+    const clave = claveDe(req);
+    const ya = memoria.leer(clave);
+    if (ya) return res.json(ya);
+    const json = res.json.bind(res);
+    res.json = (cuerpo) => {
+      if (res.statusCode === 200 && sePuede(cuerpo)) memoria.guardar(clave, cuerpo);
+      return json(cuerpo);
+    };
+    next();
+  };
+}
+
 /* POST /eventos/publicos/slug/:slug/rueda/inscribir
  *
  * Quien ya tiene boleta se da de alta en la rueda de negocios él mismo, como
@@ -1207,8 +1231,15 @@ router.post('/slug/:slug/rueda/inscribir', authLimiter, async (req, res) => {
   res.status(201).json({ ya: false, ficha: data, codigo: cod });
 });
 
-/* GET /eventos/publicos/slug/:slug */
-router.get('/slug/:slug', async (req, res) => {
+/* GET /eventos/publicos/slug/:slug
+ *
+ * Con 20 s de memoria para visitantes SIN sesión cuando la respuesta es la
+ * misma para todos: evento publicado o cancelado. Ver `lib/memoriaCorta.js`. */
+const paginaPublica = memoriaCorta({ ms: 20 * 1000 });
+router.get('/slug/:slug', recordarParaAnonimos(paginaPublica,
+  (req) => `pagina|${req.params.slug}|${req.query.seccion ?? ''}`,
+  (cuerpo) => ['publicado', 'cancelado'].includes(cuerpo?.evento?.estado)),
+async (req, res) => {
   const { slug } = req.params;
 
   const { data: evento, error } = await supabase
@@ -1841,7 +1872,7 @@ router.get('/cupo/:token', async (req, res) => {
    lectura (todas las salas/tracks), sin necesidad de login ni boleta.
    Los favoritos personales se consultan aparte (requieren boleta), vía
    /eventos/:eventoId/agenda/mis-favoritos. */
-router.get('/slug/:slug/agenda', async (req, res) => {
+router.get('/slug/:slug/agenda', recordarParaAnonimos(paginaPublica, (req) => `agenda|${req.params.slug}|${JSON.stringify(req.query)}`), async (req, res) => {
   const { slug } = req.params;
 
   const { data: evento } = await supabase
@@ -1941,7 +1972,7 @@ router.get('/slug/:slug/agenda', async (req, res) => {
    ni la prueba de contratos entre modulos, que solo mira los require
    desestructurados. El backend no tiene linter; esta es la clase de fallo que
    uno tendria. */
-router.get('/slug/:slug/rueda', async (req, res) => {
+router.get('/slug/:slug/rueda', recordarParaAnonimos(paginaPublica, (req) => `rueda|${req.params.slug}`), async (req, res) => {
   const { data: evento } = await supabase
     .from('eventos')
     .select('id, titulo, slug, estado, deleted_at, fecha_inicio, timezone')
@@ -2408,3 +2439,4 @@ router.post('/slug/:slug/waitlist', async (req, res) => {
 });
 
 module.exports = router;
+module.exports._paginaPublica = paginaPublica;
