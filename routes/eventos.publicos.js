@@ -10,7 +10,7 @@ const { signTicketQR } = require('../lib/qr.js');
 const { emitirPuestos, modoDelTipo } = require('../lib/emitirPuestos.js');
 const { boletaQueYaTenia } = require('../lib/yaEstabaRegistrado.js');
 const { tramoPedido, datosDelTramo, filtrarPorTexto } = require('../lib/tramoDeLista.js');
-const { normalizarContacto, tarjetaPublica } = require('../lib/tarjetaContacto.js');
+const { tarjetaPublica, camposElegidos } = require('../lib/tarjetaContacto.js');
 const geometria = require('../lib/geometriaDelPlano.js');
 const rolDeBoleta = require('../lib/rolDeBoleta.js');
 const { anotarConstancia } = require('../lib/constanciaLegal.js');
@@ -229,7 +229,7 @@ router.get('/ticket/:codigo', async (req, res) => {
      opcional: si la base no la tiene, la boleta se enseña igual y la sección de
      la tarjeta no sale. Esta página es la que alguien abre en la puerta del
      evento; que falte una migración no puede dejarla sin su QR. */
-  const EXTRAS_BOLETA = [', contacto, contacto_publico', ''];
+  const EXTRAS_BOLETA = [', contacto_oculto', ''];
   let data = null;
   let error = null;
   for (const extraBoleta of EXTRAS_BOLETA) {
@@ -247,6 +247,17 @@ router.get('/ticket/:codigo', async (req, res) => {
 
   if (data.evento?.id) {
     data.evento.campos_formulario = await camposDelEvento(data.evento.id);
+
+    /* Qué verá quien escanee el QR de esta persona, dicho con las etiquetas
+       del evento. Se resuelve aquí, con la misma regla que la tarjeta pública
+       (`lib/tarjetaContacto.js`), para que «Mi boleta» no le prometa a nadie
+       una lista distinta de la que de verdad se enseña. Vacío = el evento no
+       comparte contactos, y la sección no sale. */
+    data.tarjeta_contacto = {
+      campos: camposElegidos(data.evento.page_json?.tarjeta_contacto, data.evento.campos_formulario || [])
+        .map(c => c.etiqueta),
+      oculto: Boolean(data.contacto_oculto),
+    };
 
     /* ── A qué actividades está inscrita esta boleta ──────────────────────
      *
@@ -555,43 +566,42 @@ router.post('/slug/:slug/prellenar-boleta', authLimiter, async (req, res) => {
   });
 });
 
-/* ── La tarjeta de contacto de una escarapela (0133) ────────────────────
+/* ── La tarjeta de contacto de una escarapela ───────────────────────────
  *
  * GET /eventos/publicos/contacto/:codigo
  *
- * Es la otra cara del QR: el escáner del evento lee el código y abre la
- * puerta; la cámara de otro asistente lee la misma URL y llega aquí. Dos usos
- * del mismo papel, y por eso no puede contestar lo mismo a los dos.
+ * La otra cara del QR: el escáner del evento lee el código y abre la puerta;
+ * la cámara de otro asistente lee la misma URL y llega aquí.
  *
- * Lo que devuelve es SÓLO lo que la persona escribió para esto y encendió a
- * propósito (`lib/tarjetaContacto.js`). Sin autorización no viaja ni el
- * nombre: contesta que esa persona no comparte sus datos, que es distinto de
- * «ese código no existe» y es lo que quien acaba de escanear necesita saber
- * para no volver a intentarlo.
+ * Qué se enseña lo decide `lib/tarjetaContacto.js`: los datos de contacto que
+ * el organizador eligió para su evento, de quien no haya pedido ocultarlos.
+ * Nunca una pregunta que no sea de contacto, aunque alguien la haya dejado en
+ * la lista.
  *
  * `authLimiter` porque, como `/verificar`, contesta sobre la existencia de un
- * código: sin freno, esto es una forma de recorrer códigos a ciegas. */
+ * código: sin freno, esto sería una forma de recorrer códigos a ciegas. */
 router.get('/contacto/:codigo', authLimiter, async (req, res) => {
   const codigo = String(req.params.codigo || '').toUpperCase().trim();
   if (codigo.length < 4) return res.status(400).json({ error: 'Código inválido.' });
 
   const { data: ticket, error } = await supabase
     .from('tickets')
-    .select('id, estado, guest_nombre, contacto_publico, contacto, evento:eventos!evento_id(titulo, slug, estado, deleted_at)')
+    .select(`id, estado, guest_nombre, guest_email, respuestas, contacto_oculto,
+             usuario:profiles!user_id(nombre, email),
+             evento:eventos!evento_id(id, titulo, slug, estado, deleted_at, page_json)`)
     .eq('codigo', codigo)
     .maybeSingle();
 
   if (error) {
-    /* Sin la 0133 aplicada la columna no existe. Se dice qué falta en vez de
-       un 500 a secas: esta página la abre alguien con el móvil delante de otra
+    /* Sin la 0134 aplicada la columna no existe. Se dice qué pasa en vez de
+       un 500 a secas: esto lo abre alguien con el móvil delante de otra
        persona, y «algo salió mal» ahí no ayuda a nadie. */
-    if (/contacto_publico|contacto/.test(error.message || '')) {
+    if (/contacto_oculto/.test(error.message || '')) {
       return res.status(503).json({ error: 'Las tarjetas de contacto todavía no están disponibles en este evento.' });
     }
     return res.status(500).json({ error: error.message });
   }
   if (!ticket) return res.status(404).json({ error: 'No encontramos esa escarapela.' });
-  /* Una boleta anulada no presenta a nadie. */
   if (['invalido', 'reembolsado', 'cancelado'].includes(ticket.estado)) {
     return res.status(404).json({ error: 'Esa escarapela ya no es válida.' });
   }
@@ -600,19 +610,29 @@ router.get('/contacto/:codigo', authLimiter, async (req, res) => {
     return res.status(404).json({ error: 'No encontramos esa escarapela.' });
   }
 
-  res.json({ ...tarjetaPublica(ticket), evento: { titulo: ev.titulo, slug: ev.slug } });
+  /* Si esta lectura fallara, `camposDelEvento` lo anota y devuelve vacío, y la
+     tarjeta contesta «el evento no comparte» — que es el lado seguro: mejor no
+     enseñar un contacto que enseñar uno sin haber podido comprobar la regla. */
+  const camposForm = await camposDelEvento(ev.id, { columnas: 'id, etiqueta, tipo, sensible', ordenar: false });
+
+  res.json({
+    ...tarjetaPublica({ ticket, config: ev.page_json?.tarjeta_contacto, camposForm }),
+    evento: { titulo: ev.titulo, slug: ev.slug },
+  });
 });
 
-/* PUT /eventos/publicos/contacto/:codigo — la persona edita SU tarjeta.
+/* PUT /eventos/publicos/contacto/:codigo — «no quiero que aparezcan mis datos».
  *
- * Con el código de su boleta y sin cuenta, igual que «mi boleta» y que el
- * portal del expositor: quien tiene el código es quien tiene la escarapela en
- * la mano. Encender y apagar es el mismo gesto —`publico: false` borra la
- * tarjeta de la vista al instante—, porque una autorización que cuesta más
- * retirar que dar no es una autorización. */
+ * Con el código de su boleta y sin cuenta, igual que «mi boleta»: quien tiene
+ * el código es quien tiene la escarapela en la mano. Ocultar y volver a
+ * mostrar es el mismo gesto, y ninguno de los dos toca el ingreso: con los
+ * datos ocultos, el QR sigue abriendo la puerta. */
 router.put('/contacto/:codigo', authLimiter, async (req, res) => {
   const codigo = String(req.params.codigo || '').toUpperCase().trim();
   if (codigo.length < 4) return res.status(400).json({ error: 'Código inválido.' });
+  if (typeof req.body?.oculto !== 'boolean') {
+    return res.status(400).json({ error: 'Falta decir si los datos se ocultan o se muestran.' });
+  }
 
   const { data: ticket, error: e1 } = await supabase
     .from('tickets').select('id, estado').eq('codigo', codigo).maybeSingle();
@@ -622,25 +642,15 @@ router.put('/contacto/:codigo', authLimiter, async (req, res) => {
     return res.status(400).json({ error: 'Esa boleta ya no es válida.' });
   }
 
-  const contacto = normalizarContacto(req.body?.contacto);
-  const publico = req.body?.publico === true;
-  /* Encender la tarjeta sin nada escrito enseñaría una tarjeta vacía con el
-     nombre de la persona. Se dice, en vez de guardarlo. */
-  if (publico && !Object.keys(contacto).length) {
-    return res.status(400).json({ error: 'Escribe al menos un dato de contacto antes de compartir tu tarjeta.' });
-  }
-
   const { error: e2 } = await supabase
-    .from('tickets')
-    .update({ contacto, contacto_publico: publico })
-    .eq('id', ticket.id);
+    .from('tickets').update({ contacto_oculto: req.body.oculto }).eq('id', ticket.id);
   if (e2) {
-    if (/contacto_publico|contacto/.test(e2.message || '')) {
-      return res.status(503).json({ error: 'Falta aplicar la migración 0133: todavía no se pueden guardar tarjetas de contacto.' });
+    if (/contacto_oculto/.test(e2.message || '')) {
+      return res.status(503).json({ error: 'Falta aplicar la migración 0134: todavía no se puede guardar esta preferencia.' });
     }
     return res.status(500).json({ error: e2.message });
   }
-  res.json({ ok: true, publico, contacto });
+  res.json({ ok: true, oculto: req.body.oculto });
 });
 
 router.post('/ticket/:codigo/formulario', async (req, res) => {
