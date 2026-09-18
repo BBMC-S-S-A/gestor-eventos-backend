@@ -1150,6 +1150,7 @@ router.post('/:eventoId/checkin', sesion('Lo opera quien está en la puerta: la 
       && diaDelEvento(ticket.checked_in_at, evCtx?.timezone) !== hoyDelEvento;
 
     if (losPuestos.length <= 1 && ticket.estado === 'usado' && !entroOtroDia) {
+      anotarRechazo(ticket, req.user?.id, ticket.checked_in_at);
       return res.status(409).json({
         error: 'Esta boleta ya fue usada.',
         ticket,
@@ -1301,6 +1302,7 @@ router.post('/:eventoId/checkin', sesion('Lo opera quien está en la puerta: la 
         .from('tickets')
         .select(`*, tipo:ticket_types!ticket_type_id(nombre)`)
         .eq('id', ticket.id).maybeSingle();
+      anotarRechazo(ticket, req.user?.id, yaEstaba?.checked_in_at);
       return res.status(409).json({
         error: 'Esta boleta ya fue usada.',
         ticket: yaEstaba || ticket,
@@ -2137,5 +2139,24 @@ router.get('/:eventoId/clientes/:ticketId/archivo', exige(['ver_clientes', 'gest
     res.status(e.message === 'No autorizado.' ? 403 : 400).json({ error: e.message });
   }
 });
+
+
+/* Anota un «ya fue usada hoy» en `puerta_rechazos` (0135).
+ *
+ * Sin `await` a propósito: la puerta contesta en el acto y la constancia se
+ * escribe detrás. Si falla —la migración sin aplicar, la base lenta— se pierde
+ * esa fila y se avisa en el log, pero quien está en la puerta no espera ni ve
+ * un error por algo que no es suyo. */
+function anotarRechazo(ticket, operadorId, entroAt) {
+  supabase.from('puerta_rechazos').insert({
+    evento_id: ticket.evento_id,
+    ticket_id: ticket.id,
+    motivo: 'ya_usada_hoy',
+    operador_id: operadorId || null,
+    entro_at: entroAt || null,
+  }).then(({ error }) => {
+    if (error) console.warn('[puerta] no se pudo anotar el rechazo:', error.message);
+  });
+}
 
 module.exports = router;
