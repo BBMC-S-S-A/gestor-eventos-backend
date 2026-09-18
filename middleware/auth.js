@@ -50,10 +50,70 @@ function porNosotros(req) {
   return propia().verificar(req);
 }
 
-/* El camino viejo. Se deja intacto a propósito. */
+/* ── Lo que costaba el camino viejo, medido ─────────────────────────────
+ *
+ * Con la identidad propia apagada, CADA petición a la API hacía una llamada
+ * a `auth/v1/user` de Supabase para saber quién era. Medido el día 1 de
+ * FESTECH (17-sep, 20 horas de registros de Supabase): 333.059 llamadas a
+ * `auth/v1/user`, más de la mitad de TODAS las peticiones del proyecto. Las
+ * pantallas que se refrescan solas —el mostrador, el aforo, el escáner—
+ * pedían lo mismo decenas de veces por minuto con el mismo token.
+ *
+ * Se recuerda la respuesta un minuto por token. Lo que se pierde es poco y
+ * está acotado: una sesión cerrada en Supabase sigue valiendo hasta un minuto
+ * más aquí. Nunca más allá de la caducidad que lleva el propio token, y sólo
+ * se recuerdan los aciertos: un token rechazado se vuelve a preguntar.
+ *
+ * La clave es el hash del token y no el token: esto vive en memoria del
+ * proceso y no hace falta guardar credenciales enteras para reconocerlas. */
+const crypto = require('crypto');
+const RECUERDO_MS = 60 * 1000;
+const MAX_RECORDADOS = 5000;
+const recordados = new Map(); // hash → { user, hasta }
+
+function hashDe(token) {
+  return crypto.createHash('sha256').update(token).digest('base64');
+}
+
+/* La caducidad que dice el propio token (`exp`, en segundos). Se lee sin
+   verificar la firma: sólo sirve para no recordar un token más allá de su
+   vida, y Supabase ya lo validó entero la primera vez. */
+function caducidadDe(token) {
+  try {
+    const cuerpo = JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString('utf8'));
+    return Number(cuerpo.exp) ? Number(cuerpo.exp) * 1000 : null;
+  } catch { return null; }
+}
+
+function recordar(token, user) {
+  const exp = caducidadDe(token);
+  const hasta = Math.min(Date.now() + RECUERDO_MS, exp || Infinity);
+  if (hasta <= Date.now()) return;
+  /* Tope de memoria: si se llena, fuera los más viejos. Un Map conserva el
+     orden de inserción, así que los primeros son los más antiguos. */
+  if (recordados.size >= MAX_RECORDADOS) {
+    const sobran = recordados.size - MAX_RECORDADOS + 1;
+    let i = 0;
+    for (const k of recordados.keys()) { if (i++ >= sobran) break; recordados.delete(k); }
+  }
+  recordados.set(hashDe(token), { user, hasta });
+}
+
+function recordado(token) {
+  const k = hashDe(token);
+  const r = recordados.get(k);
+  if (!r) return null;
+  if (r.hasta <= Date.now()) { recordados.delete(k); return null; }
+  return r.user;
+}
+
+/* El camino viejo, ahora con memoria de un minuto. */
 async function porSupabase(token) {
+  const ya = recordado(token);
+  if (ya) return ya;
   const { data, error } = await supabase.auth.getUser(token);
   if (error || !data?.user) return null;
+  recordar(token, data.user);
   return data.user;
 }
 
@@ -83,4 +143,4 @@ async function verifySupabaseJWTOptional(req, _res, next) {
   next();
 }
 
-module.exports = { verifySupabaseJWT, verifySupabaseJWTOptional };
+module.exports = { verifySupabaseJWT, verifySupabaseJWTOptional, _paraPruebas: { recordados, porSupabase } };
