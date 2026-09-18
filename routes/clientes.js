@@ -172,9 +172,29 @@ router.get('/:eventoId/origenes', exige(['ver_clientes', 'gestionar_clientes']),
   res.json({ origenes: [...por.values()].sort((a, b) => b.total - a.total) });
 });
 
+/* «La última fila que ya tengo», tal como la devolvió la tanda anterior.
+ *
+ * Se valida entera antes de usarla: va a parar a un filtro de PostgREST, así
+ * que un id que no sea un uuid o una fecha inventada no pueden llegar a la
+ * consulta. Si no cuadra, se ignora y se pagina como siempre — una lista
+ * completa de más vale más que un error por un cursor viejo. */
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+/* La fecha se pasa TAL CUAL viene de la base, sólo con la zona escrita como
+   `Z`. Un `new Date(...).toISOString()` la redondearía a milisegundos, y
+   `created_at` tiene microsegundos: la fila del corte volvería a entrar (o se
+   perdería) cada vez que dos boletas cayeran en el mismo milisegundo. */
+const FECHA = /^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?)(?:Z|\+00(?::?00)?)$/;
+function leerCursor(cursor) {
+  const [fecha, id] = String(cursor || '').split('|');
+  if (!fecha || !id || !UUID.test(id)) return null;
+  const m = FECHA.exec(fecha.trim());
+  if (!m) return null;
+  return { created_at: `${m[1]}T${m[2]}Z`, id };
+}
+
 router.get('/:eventoId/clientes', exige(PERMS_CLIENTES), async (req, res) => {
   const { eventoId } = req.params;
-  const { q, estado, ticket_type_id } = req.query;
+  const { q, estado, ticket_type_id, cursor } = req.query;
   /* Cuántas y cuál página, saneadas.
    *
    * Antes se hacía `(Number(page) - 1) * Number(limit)` con lo que llegara: un
@@ -208,8 +228,31 @@ router.get('/:eventoId/clientes', exige(PERMS_CLIENTES), async (req, res) => {
         tipo:ticket_types!ticket_type_id${unido}(id, nombre, precio, currency)
       `, { count: 'exact' })
       .eq('evento_id', eventoId)
+      /* El `id` desempata. Sin él, dos boletas del mismo instante salen en el
+         orden que Postgres quiera —distinto en cada consulta—, y con páginas
+         eso significa que una sale dos veces y otra no sale. */
       .order('created_at', { ascending: false })
-      .range(tramo.desde, tramo.hasta);
+      .order('id', { ascending: false });
+
+    /* ── Paginar por cursor y no por número de página ─────────────────────
+     *
+     * El día del evento entran boletas MIENTRAS el panel está recorriendo las
+     * páginas. Con `range(desde, hasta)`, cada fila nueva empuja a las demás
+     * hacia abajo: la que estaba al final de la página 1 aparece otra vez al
+     * principio de la página 2, y la última de cada página se pierde. Con
+     * cientos de registros por hora, eso es lo que se vio en FESTECH — el
+     * mismo nombre repetido seis veces y gente que no aparecía al buscarla.
+     *
+     * El cursor es «la última fila que ya tienes» (su fecha y su id): se pide
+     * lo anterior a ella, así que da igual cuántas entren por arriba. */
+    const corte = leerCursor(cursor);
+    if (corte) {
+      query = query
+        .or(`created_at.lt.${corte.created_at},and(created_at.eq.${corte.created_at},id.lt.${corte.id})`)
+        .limit(tramo.porPagina);
+    } else {
+      query = query.range(tramo.desde, tramo.hasta);
+    }
 
     if (estado === 'sin_pagar') {
       /* «Sin pagar» no es un estado de la boleta, es una pregunta: quien
@@ -246,8 +289,14 @@ router.get('/:eventoId/clientes', exige(PERMS_CLIENTES), async (req, res) => {
      *
      * Mismo patrón que `/dinero`, más abajo en este archivo, que ya lo tenía
      * resuelto. */
+    /* Las stats recorren TODAS las boletas del evento, en páginas de mil. Con
+       tres mil boletas son cuatro consultas más por cada página pedida, y el
+       panel pide dieciséis seguidas para armar la lista de la puerta: sesenta
+       y cuatro recorridos completos para pintar una lista. Se calculan sólo
+       cuando se piden —la primera página— y en las demás no viajan. */
+    const quiereStats = !corte && tramo.pagina === 1 && req.query.stats !== '0';
     const all = [];
-    for (let desde = 0; desde < 50000; desde += 1000) {
+    for (let desde = 0; quiereStats && desde < 50000; desde += 1000) {
       const { data: pagina, error: ePag } = await supabase
         .from('tickets').select('estado, precio_pagado')
         .eq('evento_id', eventoId)
@@ -258,7 +307,7 @@ router.get('/:eventoId/clientes', exige(PERMS_CLIENTES), async (req, res) => {
       if (!pagina || pagina.length < 1000) break;
     }
 
-    const stats = (all || []).reduce((acc, t) => {
+    const stats = !quiereStats ? null : (all || []).reduce((acc, t) => {
       acc.total++;
       acc[t.estado] = (acc[t.estado] || 0) + 1;
       acc.ingresos += Number(t.precio_pagado) || 0;
@@ -300,6 +349,12 @@ router.get('/:eventoId/clientes', exige(PERMS_CLIENTES), async (req, res) => {
          386» y un «siguiente». Antes sólo viajaba `total`, y el panel ni lo
          miraba: la lista se cortaba a las 100 y no lo decía. */
       ...datosDelTramo(tramo, count),
+      /* Con qué seguir: la última fila de esta tanda. El panel lo devuelve tal
+         cual en `cursor` y recibe lo anterior a ella, sin repetir ni saltarse
+         nada aunque entren boletas nuevas entre una tanda y la siguiente. */
+      proximo_cursor: (data && data.length === tramo.porPagina)
+        ? `${data[data.length - 1].created_at}|${data[data.length - 1].id}`
+        : null,
       stats,
       tipos: tipos || [],
       campos_formulario: camposForm || [],
