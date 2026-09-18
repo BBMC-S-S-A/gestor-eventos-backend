@@ -10,6 +10,7 @@ const { signTicketQR } = require('../lib/qr.js');
 const { emitirPuestos, modoDelTipo } = require('../lib/emitirPuestos.js');
 const { boletaQueYaTenia } = require('../lib/yaEstabaRegistrado.js');
 const { tramoPedido, datosDelTramo, filtrarPorTexto } = require('../lib/tramoDeLista.js');
+const { normalizarContacto, tarjetaPublica } = require('../lib/tarjetaContacto.js');
 const geometria = require('../lib/geometriaDelPlano.js');
 const rolDeBoleta = require('../lib/rolDeBoleta.js');
 const { anotarConstancia } = require('../lib/constanciaLegal.js');
@@ -205,9 +206,9 @@ router.get('/ticket/:codigo', async (req, res) => {
      pantalla: una reserva gratuita legítimamente «apartada», y una compra cuyo
      pago no se completó. La segunda tiene que enterarse ANTES de plantarse en
      la puerta, y sin el precio no hay forma de saber cuál es cuál. */
-  const COLS = (extra) => `
+  const COLS = (extra, extraBoleta) => `
       id, codigo, qr_token, estado, precio_pagado, created_at, checked_in_at, respuestas,
-      guest_nombre, guest_email, user_id,
+      guest_nombre, guest_email, user_id${extraBoleta},
       tipo:ticket_types!ticket_type_id(nombre, descripcion, precio, currency, es_expositor${extra}),
       evento:eventos!evento_id(id, slug, titulo, fecha_inicio, fecha_fin, location_nombre, cover_url, page_json,
                                modalidad, url_virtual, timezone)
@@ -224,13 +225,21 @@ router.get('/ticket/:codigo', async (req, res) => {
    * enseñando la boleta — que es lo único que no puede fallar aquí: ésta es la
    * página que alguien abre en la puerta del evento. */
   const EXTRAS = [', crea, instrucciones', ', crea', ''];
+  /* Lo mismo para las columnas de la BOLETA. La tarjeta de contacto (0133) es
+     opcional: si la base no la tiene, la boleta se enseña igual y la sección de
+     la tarjeta no sale. Esta página es la que alguien abre en la puerta del
+     evento; que falte una migración no puede dejarla sin su QR. */
+  const EXTRAS_BOLETA = [', contacto, contacto_publico', ''];
   let data = null;
   let error = null;
-  for (const extra of EXTRAS) {
-    ({ data, error } = await supabase
-      .from('tickets').select(COLS(extra)).eq('codigo', codigo).maybeSingle());
+  for (const extraBoleta of EXTRAS_BOLETA) {
+    for (const extra of EXTRAS) {
+      ({ data, error } = await supabase
+        .from('tickets').select(COLS(extra, extraBoleta)).eq('codigo', codigo).maybeSingle());
+      if (!error) break;
+      console.error(`[ticket] sin \`${extra.trim() || 'columnas de más'}\`: ${error.message}`);
+    }
     if (!error) break;
-    console.error(`[ticket] sin \`${extra.trim() || 'columnas de más'}\`: ${error.message}`);
   }
 
   if (error) return res.status(500).json({ error: error.message });
@@ -544,6 +553,94 @@ router.post('/slug/:slug/prellenar-boleta', authLimiter, async (req, res) => {
       .filter(c => respuestas[c.id] === undefined)
       .map(c => ({ id: c.id, etiqueta: c.etiqueta })),
   });
+});
+
+/* ── La tarjeta de contacto de una escarapela (0133) ────────────────────
+ *
+ * GET /eventos/publicos/contacto/:codigo
+ *
+ * Es la otra cara del QR: el escáner del evento lee el código y abre la
+ * puerta; la cámara de otro asistente lee la misma URL y llega aquí. Dos usos
+ * del mismo papel, y por eso no puede contestar lo mismo a los dos.
+ *
+ * Lo que devuelve es SÓLO lo que la persona escribió para esto y encendió a
+ * propósito (`lib/tarjetaContacto.js`). Sin autorización no viaja ni el
+ * nombre: contesta que esa persona no comparte sus datos, que es distinto de
+ * «ese código no existe» y es lo que quien acaba de escanear necesita saber
+ * para no volver a intentarlo.
+ *
+ * `authLimiter` porque, como `/verificar`, contesta sobre la existencia de un
+ * código: sin freno, esto es una forma de recorrer códigos a ciegas. */
+router.get('/contacto/:codigo', authLimiter, async (req, res) => {
+  const codigo = String(req.params.codigo || '').toUpperCase().trim();
+  if (codigo.length < 4) return res.status(400).json({ error: 'Código inválido.' });
+
+  const { data: ticket, error } = await supabase
+    .from('tickets')
+    .select('id, estado, guest_nombre, contacto_publico, contacto, evento:eventos!evento_id(titulo, slug, estado, deleted_at)')
+    .eq('codigo', codigo)
+    .maybeSingle();
+
+  if (error) {
+    /* Sin la 0133 aplicada la columna no existe. Se dice qué falta en vez de
+       un 500 a secas: esta página la abre alguien con el móvil delante de otra
+       persona, y «algo salió mal» ahí no ayuda a nadie. */
+    if (/contacto_publico|contacto/.test(error.message || '')) {
+      return res.status(503).json({ error: 'Las tarjetas de contacto todavía no están disponibles en este evento.' });
+    }
+    return res.status(500).json({ error: error.message });
+  }
+  if (!ticket) return res.status(404).json({ error: 'No encontramos esa escarapela.' });
+  /* Una boleta anulada no presenta a nadie. */
+  if (['invalido', 'reembolsado', 'cancelado'].includes(ticket.estado)) {
+    return res.status(404).json({ error: 'Esa escarapela ya no es válida.' });
+  }
+  const ev = ticket.evento || {};
+  if (ev.deleted_at || ev.estado !== 'publicado') {
+    return res.status(404).json({ error: 'No encontramos esa escarapela.' });
+  }
+
+  res.json({ ...tarjetaPublica(ticket), evento: { titulo: ev.titulo, slug: ev.slug } });
+});
+
+/* PUT /eventos/publicos/contacto/:codigo — la persona edita SU tarjeta.
+ *
+ * Con el código de su boleta y sin cuenta, igual que «mi boleta» y que el
+ * portal del expositor: quien tiene el código es quien tiene la escarapela en
+ * la mano. Encender y apagar es el mismo gesto —`publico: false` borra la
+ * tarjeta de la vista al instante—, porque una autorización que cuesta más
+ * retirar que dar no es una autorización. */
+router.put('/contacto/:codigo', authLimiter, async (req, res) => {
+  const codigo = String(req.params.codigo || '').toUpperCase().trim();
+  if (codigo.length < 4) return res.status(400).json({ error: 'Código inválido.' });
+
+  const { data: ticket, error: e1 } = await supabase
+    .from('tickets').select('id, estado').eq('codigo', codigo).maybeSingle();
+  if (e1) return res.status(500).json({ error: e1.message });
+  if (!ticket) return res.status(404).json({ error: 'Boleta no encontrada.' });
+  if (['invalido', 'reembolsado', 'cancelado'].includes(ticket.estado)) {
+    return res.status(400).json({ error: 'Esa boleta ya no es válida.' });
+  }
+
+  const contacto = normalizarContacto(req.body?.contacto);
+  const publico = req.body?.publico === true;
+  /* Encender la tarjeta sin nada escrito enseñaría una tarjeta vacía con el
+     nombre de la persona. Se dice, en vez de guardarlo. */
+  if (publico && !Object.keys(contacto).length) {
+    return res.status(400).json({ error: 'Escribe al menos un dato de contacto antes de compartir tu tarjeta.' });
+  }
+
+  const { error: e2 } = await supabase
+    .from('tickets')
+    .update({ contacto, contacto_publico: publico })
+    .eq('id', ticket.id);
+  if (e2) {
+    if (/contacto_publico|contacto/.test(e2.message || '')) {
+      return res.status(503).json({ error: 'Falta aplicar la migración 0133: todavía no se pueden guardar tarjetas de contacto.' });
+    }
+    return res.status(500).json({ error: e2.message });
+  }
+  res.json({ ok: true, publico, contacto });
 });
 
 router.post('/ticket/:codigo/formulario', async (req, res) => {
