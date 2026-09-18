@@ -99,3 +99,31 @@ test('las rutas tienen freno y ocultarse no toca el ingreso', () => {
   assert.match(cuerpo, /update\(\{ contacto_oculto: req\.body\.oculto \}\)/);
   assert.doesNotMatch(cuerpo, /estado:|checked_in_at/, 'ocultar los datos tocó el estado de la boleta');
 });
+
+test('«conectar» entiende las escarapelas ya impresas, y sólo las de su evento', () => {
+  /* FESTECH imprimió con la firma completa o con el código corto. Ninguna de
+     las dos abre una página con la cámara normal: la página de «conectar» es
+     lo que las hace servir para el networking sin reimprimir. */
+  const R = fs.readFileSync(path.join(__dirname, '..', 'routes', 'eventos.publicos.js'), 'utf8');
+  const i = R.indexOf("router.post('/slug/:slug/conectar'");
+  assert.ok(i > 0, 'no existe la ruta de conectar');
+  const cuerpo = R.slice(i, i + 2200);
+  assert.match(cuerpo, /authLimiter/);
+  assert.match(cuerpo, /verifyTicketQR\(qr_token\)/,
+    'la firma no se verifica: cualquiera podría inventar un QR con el id de otra boleta');
+  assert.match(cuerpo, /r\.evento_id !== ev\.id/, 'una escarapela de otro evento se leería aquí');
+  assert.match(cuerpo, /\.eq\('evento_id', ev\.id\)/, 'el código corto se busca fuera de este evento');
+  assert.ok(cuerpo.includes('(?:p|mi-ticket)'), 'no entiende el enlace impreso en el QR');
+});
+
+test('las dos entradas a la tarjeta contestan con la misma función', () => {
+  /* Si una comprobara el estado de la boleta y la otra no, la que no lo hace
+     sería la forma de saltarse la regla. */
+  const R = fs.readFileSync(path.join(__dirname, '..', 'routes', 'eventos.publicos.js'), 'utf8');
+  const get = R.slice(R.indexOf("router.get('/contacto/:codigo'"), R.indexOf("router.get('/contacto/:codigo'") + 400);
+  const post = R.slice(R.indexOf("router.post('/slug/:slug/conectar'"), R.indexOf("router.post('/slug/:slug/conectar'") + 2200);
+  assert.match(get, /responderTarjeta\(/);
+  assert.match(post, /responderTarjeta\(/);
+  assert.equal((R.match(/tarjetaPublica\(/g) || []).length, 1,
+    'la tarjeta se arma en más de un sitio: una de las dos entradas puede quedarse sin una regla');
+});

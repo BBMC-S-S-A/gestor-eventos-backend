@@ -6,7 +6,8 @@ const { enlaceBoleta } = require('../lib/enlacePublico.js');
 const { ocupacion, zonasDelEvento, agendaPorZona } = require('../lib/aforoZonas.js');
 const { saldoDeTicket, recompensasDisponibles } = require('../lib/saldoTicket.js');
 const { verifySupabaseJWTOptional } = require('../middleware/auth.js');
-const { signTicketQR } = require('../lib/qr.js');
+const { signTicketQR, verifyTicketQR } = require('../lib/qr.js');
+const { leerEscaneo } = require('../lib/leerEscaneo.js');
 const { emitirPuestos, modoDelTipo } = require('../lib/emitirPuestos.js');
 const { boletaQueYaTenia } = require('../lib/yaEstabaRegistrado.js');
 const { tramoPedido, datosDelTramo, filtrarPorTexto } = require('../lib/tramoDeLista.js');
@@ -580,17 +581,20 @@ router.post('/slug/:slug/prellenar-boleta', authLimiter, async (req, res) => {
  *
  * `authLimiter` porque, como `/verificar`, contesta sobre la existencia de un
  * código: sin freno, esto sería una forma de recorrer códigos a ciegas. */
-router.get('/contacto/:codigo', authLimiter, async (req, res) => {
-  const codigo = String(req.params.codigo || '').toUpperCase().trim();
-  if (codigo.length < 4) return res.status(400).json({ error: 'Código inválido.' });
-
-  const { data: ticket, error } = await supabase
-    .from('tickets')
-    .select(`id, estado, guest_nombre, guest_email, respuestas, contacto_oculto,
-             usuario:profiles!user_id(nombre, email),
-             evento:eventos!evento_id(id, titulo, slug, estado, deleted_at, page_json)`)
-    .eq('codigo', codigo)
-    .maybeSingle();
+/* La tarjeta de una boleta, ya buscada por `filtrar` (por código o por id).
+ *
+ * Una sola función para las dos puertas de entrada —el enlace impreso en el QR
+ * y la página de «conectar»— porque las dos tienen que contestar EXACTAMENTE lo
+ * mismo: si una comprobara el estado de la boleta y la otra no, la que no lo
+ * hace sería la forma de saltarse la regla. */
+async function responderTarjeta(res, filtrar, { soloEvento = null } = {}) {
+  const { data: ticket, error } = await filtrar(
+    supabase
+      .from('tickets')
+      .select(`id, estado, guest_nombre, guest_email, respuestas, contacto_oculto,
+               usuario:profiles!user_id(nombre, email),
+               evento:eventos!evento_id(id, titulo, slug, estado, deleted_at, page_json)`)
+  ).maybeSingle();
 
   if (error) {
     /* Sin la 0134 aplicada la columna no existe. Se dice qué pasa en vez de
@@ -609,16 +613,67 @@ router.get('/contacto/:codigo', authLimiter, async (req, res) => {
   if (ev.deleted_at || ev.estado !== 'publicado') {
     return res.status(404).json({ error: 'No encontramos esa escarapela.' });
   }
+  /* En la página de «conectar» de un evento, sólo cuentan las escarapelas de
+     ESE evento: escanear la de otro no puede servir para mirar sus datos. */
+  if (soloEvento && ev.id !== soloEvento) {
+    return res.status(404).json({ error: 'Esa escarapela es de otro evento.' });
+  }
 
   /* Si esta lectura fallara, `camposDelEvento` lo anota y devuelve vacío, y la
      tarjeta contesta «el evento no comparte» — que es el lado seguro: mejor no
      enseñar un contacto que enseñar uno sin haber podido comprobar la regla. */
   const camposForm = await camposDelEvento(ev.id, { columnas: 'id, etiqueta, tipo, sensible', ordenar: false });
 
-  res.json({
+  return res.json({
     ...tarjetaPublica({ ticket, config: ev.page_json?.tarjeta_contacto, camposForm }),
     evento: { titulo: ev.titulo, slug: ev.slug },
   });
+}
+
+router.get('/contacto/:codigo', authLimiter, async (req, res) => {
+  const codigo = String(req.params.codigo || '').toUpperCase().trim();
+  if (codigo.length < 4) return res.status(400).json({ error: 'Código inválido.' });
+  return responderTarjeta(res, q => q.eq('codigo', codigo));
+});
+
+/* POST /eventos/publicos/slug/:slug/conectar — «escanea para conectar».
+ *
+ * La página de networking del evento abre la cámara del celular —sin cuenta,
+ * sin instalar nada— y manda aquí lo que leyó. Sirve con las escarapelas que
+ * YA están impresas, que es el motivo de que exista: FESTECH las imprimió con
+ * la firma completa o con el código corto, y ninguna de las dos formas abre
+ * una página al escanearla con la cámara normal. Aquí se entienden las tres:
+ *
+ *   · el enlace `…/p/CODIGO` (las que se impriman desde ahora),
+ *   · el código corto suelto,
+ *   · la firma completa, que se VERIFICA con la clave del servidor antes de
+ *     creerle el id de boleta que lleva dentro.
+ *
+ * Y siempre acotado a este evento. `authLimiter` sólo cuenta las peticiones
+ * que fallan, así que escanear gente real no gasta cupo; quien prueba códigos
+ * a ciegas, sí. */
+router.post('/slug/:slug/conectar', authLimiter, async (req, res) => {
+  const texto = String(req.body?.qr || '').trim().slice(0, 2000);
+  if (!texto) return res.status(400).json({ error: 'No llegó nada escaneado.' });
+
+  const { data: ev } = await supabase
+    .from('eventos').select('id, estado, deleted_at').eq('slug', req.params.slug).maybeSingle();
+  if (!ev || ev.deleted_at || ev.estado !== 'publicado') {
+    return res.status(404).json({ error: 'Este evento no existe o no está publicado.' });
+  }
+
+  /* Un enlace impreso en el QR: se queda el código que lleva. */
+  const enlace = texto.match(/\/(?:p|mi-ticket)\/([A-Za-z0-9]+)/);
+  const { qr_token, codigo } = enlace ? { qr_token: null, codigo: enlace[1].toUpperCase() } : leerEscaneo({ qr_token: texto });
+
+  if (qr_token) {
+    const r = verifyTicketQR(qr_token);
+    if (!r.ok) return res.status(400).json({ error: 'Ese QR no es una escarapela de este evento.' });
+    if (r.evento_id !== ev.id) return res.status(404).json({ error: 'Esa escarapela es de otro evento.' });
+    return responderTarjeta(res, q => q.eq('id', r.ticket_id), { soloEvento: ev.id });
+  }
+  if (!codigo) return res.status(400).json({ error: 'Ese QR no es una escarapela de este evento.' });
+  return responderTarjeta(res, q => q.eq('codigo', codigo).eq('evento_id', ev.id), { soloEvento: ev.id });
 });
 
 /* PUT /eventos/publicos/contacto/:codigo — «no quiero que aparezcan mis datos».
