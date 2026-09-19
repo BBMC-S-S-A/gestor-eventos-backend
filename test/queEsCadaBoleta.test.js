@@ -110,7 +110,7 @@ test('la boleta prueba las columnas nuevas y cae a las viejas', () => {
   /* Ésta es la página que alguien abre en la puerta del evento: lo único que no
      puede pasar es que no salga. El último intento va sin columnas de más. */
   const RUTA = leer('routes/eventos.publicos.js');
-  assert.match(RUTA, /const EXTRAS = \[', crea, instrucciones', ', crea', ''\]/);
+  assert.match(RUTA, /const EXTRAS = \[', crea, instrucciones, vigencia_cantidad, vigencia_unidad', ', crea, instrucciones', ', crea', ''\]/);
 });
 
 test('el panel puede guardar el papel, y valida contra el catálogo', () => {

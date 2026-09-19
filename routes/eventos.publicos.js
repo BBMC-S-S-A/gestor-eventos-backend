@@ -7,6 +7,7 @@ const { ocupacion, zonasDelEvento, agendaPorZona } = require('../lib/aforoZonas.
 const { saldoDeTicket, recompensasDisponibles } = require('../lib/saldoTicket.js');
 const { verifySupabaseJWTOptional } = require('../middleware/auth.js');
 const { memoriaCorta } = require('../lib/memoriaCorta.js');
+const { tieneDuracion, textoDuracion, venceEl } = require('../lib/vigenciaDuracion.js');
 const { signTicketQR, verifyTicketQR } = require('../lib/qr.js');
 const { leerEscaneo } = require('../lib/leerEscaneo.js');
 const { emitirPuestos, modoDelTipo } = require('../lib/emitirPuestos.js');
@@ -226,12 +227,12 @@ router.get('/ticket/:codigo', async (req, res) => {
    * intento no lleva ninguna, así que una base sin ninguna de las dos sigue
    * enseñando la boleta — que es lo único que no puede fallar aquí: ésta es la
    * página que alguien abre en la puerta del evento. */
-  const EXTRAS = [', crea, instrucciones', ', crea', ''];
+  const EXTRAS = [', crea, instrucciones, vigencia_cantidad, vigencia_unidad', ', crea, instrucciones', ', crea', ''];
   /* Lo mismo para las columnas de la BOLETA. La tarjeta de contacto (0133) es
      opcional: si la base no la tiene, la boleta se enseña igual y la sección de
      la tarjeta no sale. Esta página es la que alguien abre en la puerta del
      evento; que falte una migración no puede dejarla sin su QR. */
-  const EXTRAS_BOLETA = [', contacto_oculto', ''];
+  const EXTRAS_BOLETA = [', contacto_oculto, primer_ingreso_at', ', contacto_oculto', ''];
   let data = null;
   let error = null;
   for (const extraBoleta of EXTRAS_BOLETA) {
@@ -246,6 +247,15 @@ router.get('/ticket/:codigo', async (req, res) => {
 
   if (error) return res.status(500).json({ error: error.message });
   if (!data) return res.status(404).json({ error: 'Boleta no encontrada.' });
+
+  /* Vigencia por duración (0136): «válida 2 días», y si ya entró, hasta
+     cuándo. Antes del primer ingreso sólo se dice la duración: aún no corre. */
+  if (tieneDuracion(data.tipo)) {
+    data.vigencia = {
+      duracion: textoDuracion(data.tipo),
+      vence_at: venceEl(data.tipo, data.primer_ingreso_at, data.evento?.timezone),
+    };
+  }
 
   if (data.evento?.id) {
     data.evento.campos_formulario = await camposDelEvento(data.evento.id);
@@ -1257,7 +1267,7 @@ async (req, res) => {
       organizador:profiles!owner_id(nombre, handle, avatar_url, empresa, branding, empresa_logo_url),
       ticket_types(id, nombre, descripcion, precio, currency, cupo, vendidos,
                    early_bird_precio, early_bird_hasta, venta_hasta, orden, activo,
-                   visible_publico)
+                   visible_publico, vigencia_cantidad, vigencia_unidad)
     `)
     .eq('slug', slug)
     .is('deleted_at', null)

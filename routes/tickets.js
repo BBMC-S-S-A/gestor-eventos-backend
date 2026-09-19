@@ -49,6 +49,8 @@ const CAMPOS_EDITABLES = [
      Los tres nacen apagados, así que una boleta que nadie configure se comporta
      exactamente igual que antes. */
   'vigencia_desde', 'vigencia_hasta', 'requiere_autorizacion', 'visible_publico',
+  /* Vigencia por duración (0136): «2 días» desde el primer ingreso. */
+  'vigencia_cantidad', 'vigencia_unidad',
   /* 0128 · Quién puede autorizar a las personas de esta boleta: sólo el evento,
      o también quien tiene su código. Lo segundo es lo que resuelve «el que iba
      se enfermó, va el primo» a las seis de la mañana, sin que el guardia acabe
@@ -81,6 +83,14 @@ function sanitize(body, defaults = {}) {
       }
       if ((k === 'vigencia_desde' || k === 'vigencia_hasta') && (v === '' || v === null)) v = null;
       if (k === 'crea_torneo_id' && v === '') v = null;
+      if (k === 'vigencia_cantidad') {
+        v = (v === '' || v === null) ? null : Math.floor(Number(v));
+        if (v !== null && !(v > 0)) throw new Error('La duración tiene que ser un número mayor que cero.');
+      }
+      if (k === 'vigencia_unidad') {
+        v = v || null;
+        if (v !== null && !['horas', 'dias', 'semanas'].includes(v)) throw new Error('La duración va en horas, días o semanas.');
+      }
       out[k] = v;
     }
   }

@@ -12,6 +12,7 @@ const { otorgarPuntos, otorgarBadge, reglasPuntosDeEvento } = require('../lib/ga
 const { dispatch } = require('../lib/webhooks.js');
 const { assertPermiso } = require('../lib/acceso.js');
 const { resolverTicket } = require('../lib/ticketLookup.js');
+const { vigenciaPorDuracion, textoDuracion, venceEl } = require('../lib/vigenciaDuracion.js');
 const { leerEscaneo } = require('../lib/leerEscaneo.js');
 const puertaDePuestos = require('../lib/puertaDePuestos.js');
 const { notificar } = require('../lib/notificar.js');
@@ -1121,9 +1122,9 @@ router.post('/:eventoId/checkin', sesion('Lo opera quien está en la puerta: la 
       if (r.evento_id !== eventoId) return res.status(400).json({ error: 'Este QR es de otro evento.' });
       puestoIdDelQr = r.puesto_id || null;
       genDelQr = r.gen || 0;
-      ticketQuery = supabase.from('tickets').select(`*, tipo:ticket_types!ticket_type_id(nombre, vigencia_desde, vigencia_hasta, requiere_autorizacion)`).eq('id', r.ticket_id).maybeSingle();
+      ticketQuery = supabase.from('tickets').select(`*, tipo:ticket_types!ticket_type_id(nombre, vigencia_desde, vigencia_hasta, requiere_autorizacion, vigencia_cantidad, vigencia_unidad)`).eq('id', r.ticket_id).maybeSingle();
     } else {
-      ticketQuery = supabase.from('tickets').select(`*, tipo:ticket_types!ticket_type_id(nombre, vigencia_desde, vigencia_hasta, requiere_autorizacion)`).eq('codigo', codigo.toUpperCase().trim()).eq('evento_id', eventoId).maybeSingle();
+      ticketQuery = supabase.from('tickets').select(`*, tipo:ticket_types!ticket_type_id(nombre, vigencia_desde, vigencia_hasta, requiere_autorizacion, vigencia_cantidad, vigencia_unidad)`).eq('codigo', codigo.toUpperCase().trim()).eq('evento_id', eventoId).maybeSingle();
     }
 
     const { data: ticket, error: e1 } = await ticketQuery;
@@ -1134,6 +1135,15 @@ router.post('/:eventoId/checkin', sesion('Lo opera quien está en la puerta: la 
     /* Reglas */
     if (ticket.estado === 'invalido' || ticket.estado === 'reembolsado') {
       return res.status(400).json({ error: `Boleta ${ticket.estado}.`, ticket, sound: 'error' });
+    }
+
+    /* Vigencia por duración (0136): «válida 2 días» corre desde su primer
+       ingreso. Va antes de «ya usada»: a quien se le acabó el pase hay que
+       decirle eso, no que ya entró hoy. */
+    const vigDur = vigenciaPorDuracion(ticket.tipo, ticket.primer_ingreso_at, evCtx?.timezone, checkinAt ? new Date(checkinAt).getTime() : Date.now());
+    if (!vigDur.vigente) {
+      anotarRechazo(ticket, req.user?.id, ticket.checked_in_at, 'vencida');
+      return res.status(409).json({ error: vigDur.motivo, ticket, sound: 'error', vencida: true, vence_at: vigDur.vence_at });
     }
 
     /* ¿Esta boleta lleva varios puestos? Se mira ANTES de rechazar por «ya
@@ -1281,7 +1291,7 @@ router.post('/:eventoId/checkin', sesion('Lo opera quien está en la puerta: la 
      * fila y cae en el mismo 409 de siempre. */
     let escritura = supabase
       .from('tickets')
-      .update({ estado: 'usado', checked_in_at: checkinAt, acceso: puerta?.nombre || null })
+      .update({ estado: 'usado', checked_in_at: checkinAt, acceso: puerta?.nombre || null, primer_ingreso_at: ticket.primer_ingreso_at || checkinAt })
       .eq('id', ticket.id);
     escritura = entroOtroDia
       /* Comparar contra la fecha EXACTA que se leyó hace un momento: si otra
@@ -1362,6 +1372,11 @@ router.post('/:eventoId/checkin', sesion('Lo opera quien está en la puerta: la 
          acaba de dejar pasar una boleta repetida. */
       nuevo_dia: entroOtroDia || undefined,
       entrada_anterior: entroOtroDia ? ticket.checked_in_at : undefined,
+      /* Si el pase tiene duración: hasta cuándo vale, para que la puerta lo
+         diga («válida 2 días · hasta el 20-sep a medianoche»). */
+      vigencia: venceEl(ticket.tipo, ticket.primer_ingreso_at || checkinAt, evCtx?.timezone)
+        ? { vence_at: venceEl(ticket.tipo, ticket.primer_ingreso_at || checkinAt, evCtx?.timezone), duracion: textoDuracion(ticket.tipo) }
+        : undefined,
       /* Nombre, documento y foto para comparar con la cédula. En una boleta
          normal casi todo va en `null` y la pantalla no enseña nada de más; en
          una credencial de montaje es la comprobación de verdad — la que no
@@ -2147,11 +2162,11 @@ router.get('/:eventoId/clientes/:ticketId/archivo', exige(['ver_clientes', 'gest
  * escribe detrás. Si falla —la migración sin aplicar, la base lenta— se pierde
  * esa fila y se avisa en el log, pero quien está en la puerta no espera ni ve
  * un error por algo que no es suyo. */
-function anotarRechazo(ticket, operadorId, entroAt) {
+function anotarRechazo(ticket, operadorId, entroAt, motivo = 'ya_usada_hoy') {
   supabase.from('puerta_rechazos').insert({
     evento_id: ticket.evento_id,
     ticket_id: ticket.id,
-    motivo: 'ya_usada_hoy',
+    motivo,
     operador_id: operadorId || null,
     entro_at: entroAt || null,
   }).then(({ error }) => {
