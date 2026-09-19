@@ -31,6 +31,9 @@ const {
 const { verificarConexion } = require('../lib/email.js');
 const smtpEvento = require('../lib/smtpEvento.js');
 const cola = require('../lib/colaCorreo.js');
+const { auditar } = require('../lib/auditar.js');
+const { enlaceBoleta } = require('../lib/enlacePublico.js');
+const { boletasSinCorreo } = require('../lib/boletasSinCorreo.js');
 
 const router = express.Router();
 router.use(verifySupabaseJWT);
@@ -403,6 +406,51 @@ router.post('/eventos/:id/emails/cola/reintentar', exige(PERMS_ENVIAR), async (r
     const r = await cola.reintentarFallidos(evento.id);
     if (!r.ok) return res.status(500).json({ error: r.error });
     res.json({ ok: true, reencolados: r.reencolados });
+  } catch (e) { fallo(res, e); }
+});
+
+/* Boletas que nunca recibieron su correo (ver `lib/boletasSinCorreo.js`).
+ *
+ * GET cuenta; POST las mete en la cola. El POST exige la cola encendida a
+ * propósito: miles de envíos directos de golpe chocan con el tope del
+ * proveedor y lo que no sale no deja rastro — que es exactamente lo que dejó
+ * a esta gente sin boleta. Con la cola salen al ritmo de EMAIL_MAX_POR_HORA,
+ * con prioridad baja para que una compra nueva no espere detrás. */
+router.get('/eventos/:id/emails/sin-boleta', exige(PERMS_ENVIAR), async (req, res) => {
+  try {
+    const evento = await cargarEvento(req.params.id, req.user.id, PERMS_ENVIAR);
+    const faltan = await boletasSinCorreo(evento.id);
+    res.json({ total: faltan.length, activa: cola.activa(), por_hora: cola.porHora() });
+  } catch (e) { fallo(res, e); }
+});
+
+router.post('/eventos/:id/emails/sin-boleta/enviar', exige(PERMS_ENVIAR), async (req, res) => {
+  try {
+    const evento = await cargarEvento(req.params.id, req.user.id, PERMS_ENVIAR);
+    if (!cola.activa()) {
+      return res.status(409).json({ error: 'Primero hay que encender la cola de correo (EMAIL_COLA_ACTIVA=1 en el servidor). Sin ella, miles de envíos de golpe se pierden sin dejar rastro.' });
+    }
+    const faltan = await boletasSinCorreo(evento.id);
+    const filas = [];
+    for (const t of faltan) {
+      filas.push({
+        evento_id: evento.id,
+        tipo: 'ticket',
+        to: t.guest_email,
+        ctx: {
+          nombre: t.guest_nombre,
+          tipo_boleta: t.tipo?.nombre || null,
+          codigo: t.codigo,
+          qr_token: t.qr_token,
+          enlace: await enlaceBoleta(evento.id, t.codigo),
+        },
+      });
+    }
+    const r = await cola.encolarLote(filas, { prioridad: 5 });
+    if (!r.ok) return res.status(500).json({ error: r.motivo, encolados: r.metidas });
+    auditar(req, evento.id, 'emails.reenviar_sin_boleta', { detalle: { encolados: r.metidas } });
+    const horas = Math.ceil(r.metidas / cola.porHora());
+    res.json({ ok: true, encolados: r.metidas, horas_estimadas: horas });
   } catch (e) { fallo(res, e); }
 });
 
