@@ -233,7 +233,7 @@ router.get('/:eventoId/clientes', exige(PERMS_CLIENTES), async (req, res) => {
          control de ingreso manda lo que lee como token firmado, así que la
          escarapela impresa NO pasaba el control. */
       .select(`
-        id, codigo, qr_token, estado, precio_pagado, pagado_at, checked_in_at, zona_usada, acceso, created_at,
+        id, codigo, qr_token, estado, precio_pagado, pagado_at, checked_in_at, primer_ingreso_at, zona_usada, acceso, created_at,
         escarapela_impresa_at,
         guest_email, guest_nombre, respuestas,
         usuario:profiles!user_id(id, nombre, email, avatar_url),
@@ -530,23 +530,21 @@ router.delete('/:eventoId/clientes/:ticketId', exige(PERMS_BORRAR), async (req, 
  * `personas` lo pasa quien llama porque a veces la boleta ya se borró —o su
  * silla ya se liberó— cuando toca ajustar, y entonces aquí ya no habría nada
  * que consultar. */
+/* Los dos contadores del cupo, movidos a la vez.
+ *
+ * Suman DENTRO de la base (0138) y no leyendo-y-escribiendo desde aquí: entre
+ * el `select` y el `update` cabía otra venta, las dos leían el mismo número y
+ * una se perdía. Con una venta cada diez minutos no pasa nunca; con doscientas
+ * en una hora pasa todo el rato, así que el contador mentía más cuanto mejor
+ * iba el evento. El suelo en cero lo pone ahora la propia función. */
 async function ajustarAforo(eventoId, ticketTypeId, delta, personas = 1) {
   if (ticketTypeId) {
-    const { data: tt } = await supabase
-      .from('ticket_types').select('vendidos').eq('id', ticketTypeId).maybeSingle();
-    if (tt) {
-      await supabase.from('ticket_types')
-        .update({ vendidos: Math.max(0, (tt.vendidos || 0) + delta) })
-        .eq('id', ticketTypeId);
-    }
+    await supabase.rpc('sumar_vendidos_tipo', { p_tipo: ticketTypeId, p_delta: delta });
   }
-  const { data: ev } = await supabase
-    .from('eventos').select('aforo_vendido').eq('id', eventoId).maybeSingle();
-  if (ev) {
-    await supabase.from('eventos')
-      .update({ aforo_vendido: Math.max(0, (ev.aforo_vendido || 0) + delta * Math.max(1, personas)) })
-      .eq('id', eventoId);
-  }
+  await supabase.rpc('sumar_aforo_vendido', {
+    p_evento: eventoId,
+    p_delta : delta * Math.max(1, personas),
+  });
 }
 
 /* POST /eventos/:eventoId/clientes/importar — import masivo desde CSV.
@@ -1012,10 +1010,12 @@ router.post('/:eventoId/clientes/importar', exige(PERMS_CLIENTES), async (req, r
     }
 
     if (ok.length > 0) {
-      await supabase.from('ticket_types').update({ vendidos: (tipo.vendidos || 0) + ok.length }).eq('id', tipo.id);
+      /* Un import va en una sola tanda, pero puede coincidir con las ventas de
+         la página, que siguen entrando mientras esto corre. Mismo motivo que
+         en `ajustarAforo`: se suma en la base. Ver 0138. */
+      await supabase.rpc('sumar_vendidos_tipo', { p_tipo: tipo.id, p_delta: ok.length });
       if (marcar_pagado) {
-        const { data: ev } = await supabase.from('eventos').select('aforo_vendido').eq('id', eventoId).single();
-        if (ev) await supabase.from('eventos').update({ aforo_vendido: (ev.aforo_vendido || 0) + ok.length }).eq('id', eventoId);
+        await supabase.rpc('sumar_aforo_vendido', { p_evento: eventoId, p_delta: ok.length });
       }
 
       const organizadorId = evImp && evImp.owner_id;

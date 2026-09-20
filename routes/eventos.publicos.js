@@ -2305,7 +2305,10 @@ router.post('/slug/:slug/reservar', async (req, res) => {
      emitir y sin bloquear: perder la anotación se rehace, perder la venta no. */
   anotarConstancia('tickets', ticket.id, evento.id, req.body.legal_aceptado);
 
-  await supabase.from('ticket_types').update({ vendidos: (tipo.vendidos || 0) + 1 }).eq('id', tipo.id);
+  /* El camino de MÁS concurrencia que hay: es el botón de registro de la
+     página pública, y en un festival se pulsa doscientas veces en una hora.
+     Leyendo y escribiendo desde aquí se perdían ventas simultáneas. Ver 0138. */
+  await supabase.rpc('sumar_vendidos_tipo', { p_tipo: tipo.id, p_delta: 1 });
 
   if (esGratis) {
     /* Sale ya pagada, así que el uso del código se cuenta aquí: esta boleta no
@@ -2331,9 +2334,7 @@ router.post('/slug/:slug/reservar', async (req, res) => {
      * mira variables no declaradas, y la rama sólo corre en un registro
      * gratuito real. Lo cazó alguien intentando registrarse. */
     const personas = await personasDeEspacio(silla.espacioId);
-    await supabase.from('eventos')
-      .update({ aforo_vendido: (evento.aforo_vendido || 0) + personas })
-      .eq('id', evento.id);
+    await supabase.rpc('sumar_aforo_vendido', { p_evento: evento.id, p_delta: personas });
 
     /* Y sus puestos (0118), por lo mismo que el aforo: una mesa de cuatro tiene
        que llegar a la puerta con cuatro sitios que marcar. Este camino no pasa
