@@ -12,7 +12,8 @@ const { otorgarPuntos, otorgarBadge, reglasPuntosDeEvento } = require('../lib/ga
 const { dispatch } = require('../lib/webhooks.js');
 const { assertPermiso } = require('../lib/acceso.js');
 const { resolverTicket } = require('../lib/ticketLookup.js');
-const { vigenciaPorDuracion, textoDuracion, venceEl } = require('../lib/vigenciaDuracion.js');
+const { vigenciaPorDuracion, textoDuracion, venceEl, fechaLocal, medianocheDe, sumarDias } = require('../lib/vigenciaDuracion.js');
+const { resumirRechazos } = require('../lib/resumenRechazos.js');
 const { leerEscaneo } = require('../lib/leerEscaneo.js');
 const puertaDePuestos = require('../lib/puertaDePuestos.js');
 const { notificar } = require('../lib/notificar.js');
@@ -1832,6 +1833,30 @@ router.get('/:eventoId/mapa/vivo', sesion('Lo opera quien está en la puerta: la
    Devuelve, por zona: totales del histórico completo (el corte no lo esconde),
    ocupación actual, pico simultáneo con su hora, estancia media y la curva del
    día para dibujarla. Y la lista de cortes, que explica los saltos a cero. */
+/* GET /eventos/:eventoId/puerta/rechazos?dia=AAAA-MM-DD
+ *
+ * Los «ya fue usada hoy» y las boletas vencidas de un día (hoy por defecto, en
+ * la hora del evento), resumidos: cuántos, por hora, escaneos dobles frente a
+ * boletas que vuelven más tarde, y quién insiste. Ver `lib/resumenRechazos.js`. */
+router.get('/:eventoId/puerta/rechazos', exige(PERMS_CLIENTES), async (req, res) => {
+  const { eventoId } = req.params;
+  const { data: ev } = await supabase.from('eventos').select('timezone').eq('id', eventoId).maybeSingle();
+  const tz = ev?.timezone || 'America/Bogota';
+  const dia = /^\d{4}-\d{2}-\d{2}$/.test(String(req.query.dia || '')) ? req.query.dia : fechaLocal(Date.now(), tz);
+  const desde = new Date(medianocheDe(dia, tz)).toISOString();
+  const hasta = new Date(medianocheDe(sumarDias(dia, 1), tz)).toISOString();
+
+  const { data, error } = await supabase
+    .from('puerta_rechazos')
+    .select('id, ticket_id, motivo, entro_at, created_at, ticket:tickets!ticket_id(guest_nombre, codigo, tipo:ticket_types!ticket_type_id(nombre))')
+    .eq('evento_id', eventoId)
+    .gte('created_at', desde).lt('created_at', hasta)
+    .order('created_at', { ascending: false })
+    .limit(5000);
+  if (error) return res.status(500).json({ error: error.message });
+  res.json({ dia, timezone: tz, ...resumirRechazos(data || [], tz) });
+});
+
 router.get('/:eventoId/zonas/reporte', exige(PERMS_CLIENTES), async (req, res) => {
   const { eventoId } = req.params;
   const intervalo = Math.min(180, Math.max(5, Math.floor(Number(req.query.intervalo) || 15)));
