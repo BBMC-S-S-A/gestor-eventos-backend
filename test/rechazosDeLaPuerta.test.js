@@ -51,12 +51,17 @@ test('un rechazo sin boleta no inventa una', () => {
   }
 });
 
-test('el informe de rechazos existe y pide permiso', () => {
+test('el informe de rechazos existe, pide permiso y es UNO solo', () => {
   /* Anotarlos y no poder mirarlos es lo que pasó en FESTECH: 159 rechazos
      guardados que nadie podía ver. Y son datos personales —dicen quién
      intentó entrar y cuándo—, así que la ruta pide lo mismo que la lista de
      clientes, no el permiso de estar en la puerta. */
-  assert.match(SRC, /router\.get\('\/:eventoId\/puerta\/rechazos', exige\(PERMS_CLIENTES\)/);
-  const ruta = SRC.slice(SRC.indexOf("router.get('/:eventoId/puerta/rechazos'"));
-  assert.match(ruta.slice(0, 900), /assertOwner\(eventoId, req\.user\.id, \['ver_clientes'/);
+  const rutas = SRC.match(/router\.get\('\/:eventoId\/puerta\/rechazos', exige\(PERMS_CLIENTES\)/g) || [];
+
+  /* UNA. Llegaron a existir dos con el mismo path, cada una con su forma de
+     respuesta, y Express se queda con la primera sin avisar: la segunda era
+     código muerto y la pantalla que esperaba SU forma se rompía al pintar.
+     Un `git merge` no lo ve —los dos bloques están lejos en el archivo— y los
+     tests tampoco lo veían. Ahora sí. */
+  assert.equal(rutas.length, 1, 'hay dos rutas con el mismo path: Express se queda con la primera');
 });
