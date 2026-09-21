@@ -5,9 +5,16 @@ const path = require('path');
 
 const SRC = fs.readFileSync(path.join(__dirname, '..', 'routes', 'clientes.js'), 'utf8');
 
+/* Las llamadas a `anotarRechazo`, con el motivo de cada una. Desde que la
+   función va por argumentos con nombre —hizo falta para los rechazos que NO
+   tienen boleta, como un QR ilegible— el motivo se lee así y no por posición. */
+const motivosAnotados = () =>
+  (SRC.match(/anotarRechazo\(\{[^}]*motivo:\s*'?[a-z_.]+'?/g) || [])
+    .map(m => m.match(/motivo:\s*'?([a-z_.]+)/)[1]);
+
 test('los dos «ya fue usada» de la puerta dejan constancia', () => {
   const avisos = SRC.split("error: 'Esta boleta ya fue usada.'").length - 1;
-  const anotados = (SRC.match(/ anotarRechazo\(ticket, req\.user\?\.id, [^,)]+\);/g) || []).length;
+  const anotados = motivosAnotados().filter(m => m === 'ya_usada_hoy').length;
   assert.equal(anotados, avisos, 'un camino que rechaza sin anotarlo vuelve a esconder los repetidos');
 });
 
@@ -18,5 +25,38 @@ test('anotar un rechazo no hace esperar a la puerta', () => {
 });
 
 test('una boleta vencida también deja constancia, con su motivo', () => {
-  assert.match(SRC, /anotarRechazo\(ticket, req\.user\?\.id, ticket\.checked_in_at, 'vencida'\)/);
+  assert.ok(motivosAnotados().includes('vencida'));
+});
+
+test('los rechazos SIN boleta también se anotan', () => {
+  /* Éstos son los que más tiempo cuestan en la fila —hay que teclear,
+     preguntar y volver a intentar— y son justo los que no se podían anotar
+     cuando la función pedía un `ticket` por delante. Si vuelven a caerse, el
+     informe de la puerta enseña una fila tranquila en el rato en que la gente
+     estuvo parada. */
+  const motivos = motivosAnotados();
+  for (const m of ['qr_invalido', 'no_encontrada', 'otro_evento', 'puerta_no_asignada']) {
+    assert.ok(motivos.includes(m), `el rechazo «${m}» dejó de anotarse`);
+  }
+});
+
+test('un rechazo sin boleta no inventa una', () => {
+  /* `ticket_id` queda en nulo, que es lo honesto: no se sabe quién era. La
+     función lo pone por defecto, así que basta con que esas llamadas no pasen
+     un `ticketId` cualquiera para salir del paso. */
+  const sinBoleta = SRC.match(/anotarRechazo\(\{ eventoId, motivo: '(?:qr_invalido|no_encontrada|puerta_no_asignada)'[^}]*\}\)/g) || [];
+  assert.equal(sinBoleta.length, 3, 'cambió la forma de los rechazos sin boleta');
+  for (const llamada of sinBoleta) {
+    assert.doesNotMatch(llamada, /ticketId/, 'un rechazo sin boleta no puede atarse a ninguna');
+  }
+});
+
+test('el informe de rechazos existe y pide permiso', () => {
+  /* Anotarlos y no poder mirarlos es lo que pasó en FESTECH: 159 rechazos
+     guardados que nadie podía ver. Y son datos personales —dicen quién
+     intentó entrar y cuándo—, así que la ruta pide lo mismo que la lista de
+     clientes, no el permiso de estar en la puerta. */
+  assert.match(SRC, /router\.get\('\/:eventoId\/puerta\/rechazos', exige\(PERMS_CLIENTES\)/);
+  const ruta = SRC.slice(SRC.indexOf("router.get('/:eventoId/puerta/rechazos'"));
+  assert.match(ruta.slice(0, 900), /assertOwner\(eventoId, req\.user\.id, \['ver_clientes'/);
 });
