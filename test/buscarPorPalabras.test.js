@@ -75,12 +75,18 @@ test('filtrarPorTexto deja la consulta como está si no hay nada que buscar', ()
 test('las cuatro listas que buscan usan la misma función', () => {
   /* Si una se queda con su `ilike` propio, esa lista sigue exigiendo el orden
      de las palabras y nadie lo nota: sólo devuelve menos. */
-  for (const f of ['routes/clientes.js', 'routes/emails.js', 'routes/auditoria.js']) {
+  for (const f of ['routes/emails.js', 'routes/auditoria.js']) {
     assert.match(leer(f), /filtrarPorTexto\(query, q,/, `${f} no busca por palabras`);
   }
-  /* `sesiones.js` la usa en su forma de condición, porque tiene que mezclarla
-     con la búsqueda por boleta dentro de un solo `or()`. */
-  assert.match(leer('routes/sesiones.js'), /condicionDeTexto\(q,/);
+  /* Dos la usan en su forma de CONDICIÓN, porque tienen que mezclarla con otra
+     búsqueda dentro de un solo `or()` — dos `.or()` seguidos se unen por AND, y
+     entonces la segunda rama no devolvería nada:
+       · `sesiones.js` la mezcla con la búsqueda por boleta.
+       · `clientes.js` la mezcla con la búsqueda por documento, que se resuelve
+         aparte y entra como `id.in.(...)`. Ver `lib/busquedaPorDocumento.js`. */
+  for (const f of ['routes/sesiones.js', 'routes/clientes.js']) {
+    assert.match(leer(f), /condicionDeTexto\(q,/, `${f} no busca por palabras`);
+  }
 
   /* Y ninguna vuelve a construir el filtro a mano. */
   for (const f of ['routes/clientes.js', 'routes/emails.js', 'routes/auditoria.js', 'routes/sesiones.js']) {

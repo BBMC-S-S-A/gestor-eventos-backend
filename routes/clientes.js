@@ -28,7 +28,8 @@ const { leerPuerta } = require('../lib/zonasTabla.js');
 const { COLS_TARJETA, standsPorZona } = require('../lib/expositores.js');
 const { generarCodigo } = require('../lib/codigos.js');
 const { aQuienLeImporta } = require('../lib/aQuienLeImporta.js');
-const { tramoPedido, datosDelTramo, filtrarPorTexto } = require('../lib/tramoDeLista.js');
+const { tramoPedido, datosDelTramo, condicionDeTexto } = require('../lib/tramoDeLista.js');
+const { boletasPorDocumento } = require('../lib/busquedaPorDocumento.js');
 const { yaRegistrados, clavePersona } = require('../lib/yaEstabaRegistrado.js');
 
 /* Notificar sin romper la petición si el helper falla. */
@@ -234,7 +235,7 @@ router.get('/:eventoId/clientes', exige(PERMS_CLIENTES), async (req, res) => {
          control de ingreso manda lo que lee como token firmado, así que la
          escarapela impresa NO pasaba el control. */
       .select(`
-        id, codigo, qr_token, estado, precio_pagado, pagado_at, checked_in_at, zona_usada, acceso, created_at,
+        id, codigo, qr_token, estado, precio_pagado, pagado_at, checked_in_at, primer_ingreso_at, zona_usada, acceso, created_at,
         escarapela_impresa_at,
         guest_email, guest_nombre, respuestas,
         usuario:profiles!user_id(id, nombre, email, avatar_url),
@@ -288,10 +289,31 @@ router.get('/:eventoId/clientes', exige(PERMS_CLIENTES), async (req, res) => {
     else if (impresa === 'si') query = query.not('escarapela_impresa_at', 'is', null);
     const desdeCuando = fechaValida(desde);
     if (desdeCuando) query = query.gte('created_at', desdeCuando);
-    /* Nombre, correo o código, en una sola caja: quien busca a alguien no sabe
-       de antemano por cuál de los tres lo va a encontrar. Por palabras, no por
-       trozo literal: «Pérez, Juan» tiene que encontrar a «Juan Pérez». */
-    query = filtrarPorTexto(query, q, ['guest_nombre', 'guest_email', 'codigo']);
+    /* Nombre, correo, código o DOCUMENTO, en una sola caja: quien busca a
+       alguien no sabe de antemano por cuál lo va a encontrar. Por palabras, no
+       por trozo literal: «Pérez, Juan» tiene que encontrar a «Juan Pérez».
+
+       El documento se añadió porque en el mostrador la persona dice su cédula,
+       no su correo, y hasta ahora había que buscarla por el nombre —con los
+       homónimos y las tildes que eso arrastra—. El dato ya estaba: en FESTECH
+       IBAGUÉ lo respondieron 4.481 de 4.485 boletas. Lo que pasaba es que vive
+       dentro de `respuestas`, indexado por el UUID del campo, y una búsqueda
+       sobre columnas no llega ahí.
+
+       Va como ids y no como una condición jsonb metida en el `or`: se resuelve
+       aparte (ver `lib/busquedaPorDocumento.js`) y entra aquí como una rama más
+       del mismo `or`. Tiene que ser EL MISMO: dos `.or()` seguidos los une por
+       AND, y entonces buscar una cédula no devolvería nada.
+
+       Sólo se consulta cuando lo escrito parece un documento, así que una
+       búsqueda por nombre no paga ninguna consulta de más. */
+    const idsPorDocumento = await boletasPorDocumento(eventoId, q);
+    const condTexto = condicionDeTexto(q, ['guest_nombre', 'guest_email', 'codigo']);
+    const condDocumento = idsPorDocumento.length
+      ? `id.in.(${idsPorDocumento.join(',')})`
+      : null;
+    const condBusqueda = [condTexto, condDocumento].filter(Boolean).join(',');
+    if (condBusqueda) query = query.or(condBusqueda);
 
     const { data, count, error } = await query;
     if (error) return res.status(500).json({ error: error.message });
@@ -531,23 +553,21 @@ router.delete('/:eventoId/clientes/:ticketId', exige(PERMS_BORRAR), async (req, 
  * `personas` lo pasa quien llama porque a veces la boleta ya se borró —o su
  * silla ya se liberó— cuando toca ajustar, y entonces aquí ya no habría nada
  * que consultar. */
+/* Los dos contadores del cupo, movidos a la vez.
+ *
+ * Suman DENTRO de la base (0138) y no leyendo-y-escribiendo desde aquí: entre
+ * el `select` y el `update` cabía otra venta, las dos leían el mismo número y
+ * una se perdía. Con una venta cada diez minutos no pasa nunca; con doscientas
+ * en una hora pasa todo el rato, así que el contador mentía más cuanto mejor
+ * iba el evento. El suelo en cero lo pone ahora la propia función. */
 async function ajustarAforo(eventoId, ticketTypeId, delta, personas = 1) {
   if (ticketTypeId) {
-    const { data: tt } = await supabase
-      .from('ticket_types').select('vendidos').eq('id', ticketTypeId).maybeSingle();
-    if (tt) {
-      await supabase.from('ticket_types')
-        .update({ vendidos: Math.max(0, (tt.vendidos || 0) + delta) })
-        .eq('id', ticketTypeId);
-    }
+    await supabase.rpc('sumar_vendidos_tipo', { p_tipo: ticketTypeId, p_delta: delta });
   }
-  const { data: ev } = await supabase
-    .from('eventos').select('aforo_vendido').eq('id', eventoId).maybeSingle();
-  if (ev) {
-    await supabase.from('eventos')
-      .update({ aforo_vendido: Math.max(0, (ev.aforo_vendido || 0) + delta * Math.max(1, personas)) })
-      .eq('id', eventoId);
-  }
+  await supabase.rpc('sumar_aforo_vendido', {
+    p_evento: eventoId,
+    p_delta : delta * Math.max(1, personas),
+  });
 }
 
 /* POST /eventos/:eventoId/clientes/importar — import masivo desde CSV.
@@ -1013,10 +1033,12 @@ router.post('/:eventoId/clientes/importar', exige(PERMS_CLIENTES), async (req, r
     }
 
     if (ok.length > 0) {
-      await supabase.from('ticket_types').update({ vendidos: (tipo.vendidos || 0) + ok.length }).eq('id', tipo.id);
+      /* Un import va en una sola tanda, pero puede coincidir con las ventas de
+         la página, que siguen entrando mientras esto corre. Mismo motivo que
+         en `ajustarAforo`: se suma en la base. Ver 0138. */
+      await supabase.rpc('sumar_vendidos_tipo', { p_tipo: tipo.id, p_delta: ok.length });
       if (marcar_pagado) {
-        const { data: ev } = await supabase.from('eventos').select('aforo_vendido').eq('id', eventoId).single();
-        if (ev) await supabase.from('eventos').update({ aforo_vendido: (ev.aforo_vendido || 0) + ok.length }).eq('id', eventoId);
+        await supabase.rpc('sumar_aforo_vendido', { p_evento: eventoId, p_delta: ok.length });
       }
 
       const organizadorId = evImp && evImp.owner_id;
@@ -1103,6 +1125,9 @@ router.post('/:eventoId/checkin', sesion('Lo opera quien está en la puerta: la 
     const puerta = await leerPuerta(eventoId, acceso_id);
 
     if (puerta && !puedeAtenderPuerta(puerta, req.user.id, evCtx)) {
+      /* No es culpa de quien viene: es la puerta mal asignada, y se ve en el
+         informe como una racha del mismo operador a la misma hora. */
+      anotarRechazo({ eventoId, motivo: 'puerta_no_asignada', operadorId: req.user?.id });
       return res.status(403).json({
         error: `No estás asignado a ${puerta.nombre}.`,
         sound: 'error',
@@ -1119,8 +1144,14 @@ router.post('/:eventoId/checkin', sesion('Lo opera quien está en la puerta: la 
     let genDelQr = 0;
     if (qr_token) {
       const r = verifyTicketQR(qr_token);
-      if (!r.ok) return res.status(400).json({ error: 'QR inválido.', detalle: r.error });
-      if (r.evento_id !== eventoId) return res.status(400).json({ error: 'Este QR es de otro evento.' });
+      if (!r.ok) {
+        anotarRechazo({ eventoId, motivo: 'qr_invalido', operadorId: req.user?.id });
+        return res.status(400).json({ error: 'QR inválido.', detalle: r.error });
+      }
+      if (r.evento_id !== eventoId) {
+        anotarRechazo({ eventoId, motivo: 'otro_evento', operadorId: req.user?.id });
+        return res.status(400).json({ error: 'Este QR es de otro evento.' });
+      }
       puestoIdDelQr = r.puesto_id || null;
       genDelQr = r.gen || 0;
       ticketQuery = supabase.from('tickets').select(`*, tipo:ticket_types!ticket_type_id(nombre, vigencia_desde, vigencia_hasta, requiere_autorizacion, vigencia_cantidad, vigencia_unidad)`).eq('id', r.ticket_id).maybeSingle();
@@ -1130,11 +1161,22 @@ router.post('/:eventoId/checkin', sesion('Lo opera quien está en la puerta: la 
 
     const { data: ticket, error: e1 } = await ticketQuery;
     if (e1) return res.status(500).json({ error: e1.message });
-    if (!ticket) return res.status(404).json({ error: 'Boleta no encontrada.', sound: 'error' });
-    if (ticket.evento_id !== eventoId) return res.status(400).json({ error: 'Boleta de otro evento.', sound: 'error' });
+    if (!ticket) {
+      /* Sin boleta que anotar, pero el rechazo existió y costó tiempo: suele
+         ser un código tecleado a mano que no cuadra, y una racha de éstos a la
+         misma hora dice que la fila estaba entrando con el código corto y no
+         con el QR. */
+      anotarRechazo({ eventoId, motivo: 'no_encontrada', operadorId: req.user?.id });
+      return res.status(404).json({ error: 'Boleta no encontrada.', sound: 'error' });
+    }
+    if (ticket.evento_id !== eventoId) {
+      anotarRechazo({ eventoId, ticketId: ticket.id, motivo: 'otro_evento', operadorId: req.user?.id });
+      return res.status(400).json({ error: 'Boleta de otro evento.', sound: 'error' });
+    }
 
     /* Reglas */
     if (ticket.estado === 'invalido' || ticket.estado === 'reembolsado') {
+      anotarRechazo({ eventoId, ticketId: ticket.id, motivo: ticket.estado, operadorId: req.user?.id });
       return res.status(400).json({ error: `Boleta ${ticket.estado}.`, ticket, sound: 'error' });
     }
 
@@ -1143,7 +1185,7 @@ router.post('/:eventoId/checkin', sesion('Lo opera quien está en la puerta: la 
        decirle eso, no que ya entró hoy. */
     const vigDur = vigenciaPorDuracion(ticket.tipo, ticket.primer_ingreso_at, evCtx?.timezone, checkinAt ? new Date(checkinAt).getTime() : Date.now());
     if (!vigDur.vigente) {
-      anotarRechazo(ticket, req.user?.id, ticket.checked_in_at, 'vencida');
+      anotarRechazo({ eventoId, ticketId: ticket.id, motivo: 'vencida', operadorId: req.user?.id, entroAt: ticket.checked_in_at });
       return res.status(409).json({ error: vigDur.motivo, ticket, sound: 'error', vencida: true, vence_at: vigDur.vence_at });
     }
 
@@ -1161,7 +1203,7 @@ router.post('/:eventoId/checkin', sesion('Lo opera quien está en la puerta: la 
       && diaDelEvento(ticket.checked_in_at, evCtx?.timezone) !== hoyDelEvento;
 
     if (losPuestos.length <= 1 && ticket.estado === 'usado' && !entroOtroDia) {
-      anotarRechazo(ticket, req.user?.id, ticket.checked_in_at);
+      anotarRechazo({ eventoId, ticketId: ticket.id, motivo: 'ya_usada_hoy', operadorId: req.user?.id, entroAt: ticket.checked_in_at });
       return res.status(409).json({
         error: 'Esta boleta ya fue usada.',
         ticket,
@@ -1313,7 +1355,7 @@ router.post('/:eventoId/checkin', sesion('Lo opera quien está en la puerta: la 
         .from('tickets')
         .select(`*, tipo:ticket_types!ticket_type_id(nombre)`)
         .eq('id', ticket.id).maybeSingle();
-      anotarRechazo(ticket, req.user?.id, yaEstaba?.checked_in_at);
+      anotarRechazo({ eventoId, ticketId: ticket.id, motivo: 'ya_usada_hoy', operadorId: req.user?.id, entroAt: yaEstaba?.checked_in_at });
       return res.status(409).json({
         error: 'Esta boleta ya fue usada.',
         ticket: yaEstaba || ticket,
@@ -2181,19 +2223,135 @@ router.get('/:eventoId/clientes/:ticketId/archivo', exige(['ver_clientes', 'gest
 });
 
 
-/* Anota un «ya fue usada hoy» en `puerta_rechazos` (0135).
+/* GET /eventos/:eventoId/puerta/rechazos — qué se trancó en la fila.
+ *
+ * ── Por qué hace falta un informe de lo que NO entró ─────────────────────
+ *
+ * La curva de ingresos cuenta a quien pasó. Pero una fila no se frena con la
+ * gente que pasa: se frena con la que NO pasa y hay que atender igual — la
+ * boleta que ya entró hoy, el pase vencido, el QR de otro evento. Cada uno de
+ * esos es una parada, una conversación y una persona que sigue en la puerta.
+ *
+ * Sin esto, el informe del evento enseña una fila fluida un día en que la
+ * gente estuvo veinte minutos parada discutiendo. La 0135 empezó a anotarlos;
+ * lo que faltaba era poder mirarlos.
+ *
+ * En FESTECH IBAGUÉ, el único día con la anotación desplegada dejó 159
+ * rechazos contra 518 ingresos: casi uno de cada cuatro escaneos de ese día no
+ * abrió la puerta.
+ *
+ * ── Lo que devuelve, y por qué esas cuatro cosas ─────────────────────────
+ *
+ *   `por_motivo`    · qué falló. Sin esto no se sabe si arreglar el reingreso
+ *                     o la vigencia.
+ *   `por_dia`       · si empeora o mejora con los días.
+ *   `curva`         · a qué hora, en las MISMAS franjas que el informe de
+ *                     ingresos, para poder ponerlas una encima de la otra: un
+ *                     pico de rechazos dentro del pico de entradas es el
+ *                     momento exacto en que la fila se paró.
+ *   `insistentes`   · quién lo intentó más veces. Diez rechazos de la misma
+ *                     boleta no son diez problemas: son uno, y probablemente
+ *                     alguien a quien nadie supo explicarle qué pasaba.
+ */
+router.get('/:eventoId/puerta/rechazos', exige(PERMS_CLIENTES), async (req, res) => {
+  const { eventoId } = req.params;
+  const intervalo = Math.min(180, Math.max(5, Math.floor(Number(req.query.intervalo) || 15)));
+  /* Tope. Son paradas en una puerta: miles significan que algo está muy mal, y
+     aun así el informe tiene que contestar en vez de morirse. */
+  const TOPE = 5000;
+  try {
+    await assertOwner(eventoId, req.user.id, ['ver_clientes', 'gestionar_clientes', 'ver_analytics']);
+
+    const { data: ev } = await supabase
+      .from('eventos').select('timezone').eq('id', eventoId).maybeSingle();
+
+    /* La boleta viaja con el rechazo: en la puerta lo primero que se pregunta
+       es «¿quién era?», y sin el nombre la lista es una columna de horas. */
+    const { data, error } = await supabase
+      .from('puerta_rechazos')
+      .select('id, motivo, created_at, entro_at, ticket_id, operador_id, ticket:tickets!ticket_id(codigo, guest_nombre)')
+      .eq('evento_id', eventoId)
+      .order('created_at', { ascending: false })
+      .limit(TOPE);
+    if (error) return res.status(500).json({ error: error.message });
+
+    const filas = data || [];
+    const ms = intervalo * 60 * 1000;
+    const porMotivo = new Map();
+    const porDia = new Map();
+    const cubos = new Map();
+    const insiste = new Map();
+
+    for (const r of filas) {
+      porMotivo.set(r.motivo, (porMotivo.get(r.motivo) || 0) + 1);
+      const t = new Date(r.created_at).getTime();
+      if (Number.isNaN(t)) continue;
+      const dia = diaDelEvento(r.created_at, ev?.timezone);
+      porDia.set(dia, (porDia.get(dia) || 0) + 1);
+      const cubo = Math.floor(t / ms) * ms;
+      cubos.set(cubo, (cubos.get(cubo) || 0) + 1);
+      /* Se agrupa por boleta, no por persona: una boleta es lo que se escanea,
+         y es lo que hay que ir a mirar cuando el número llama la atención. */
+      if (r.ticket_id) {
+        const antes = insiste.get(r.ticket_id);
+        if (antes) antes.n++;
+        else insiste.set(r.ticket_id, {
+          ticket_id: r.ticket_id,
+          codigo: r.ticket?.codigo || null,
+          nombre: r.ticket?.guest_nombre || null,
+          n: 1,
+          ultimo_at: r.created_at,
+        });
+      }
+    }
+
+    res.json({
+      generado_at: new Date().toISOString(),
+      intervalo,
+      total: filas.length,
+      truncado: filas.length >= TOPE,
+      por_motivo: [...porMotivo.entries()].map(([motivo, n]) => ({ motivo, n })).sort((a, b) => b.n - a.n),
+      por_dia: [...porDia.entries()].map(([dia, n]) => ({ dia, n })).sort((a, b) => a.dia.localeCompare(b.dia)),
+      curva: [...cubos.entries()].sort((a, b) => a[0] - b[0]).map(([at, n]) => ({ at: new Date(at).toISOString(), n })),
+      insistentes: [...insiste.values()].filter(x => x.n > 1).sort((a, b) => b.n - a.n).slice(0, 20),
+      ultimos: filas.slice(0, 100).map(r => ({
+        at: r.created_at,
+        motivo: r.motivo,
+        codigo: r.ticket?.codigo || null,
+        nombre: r.ticket?.guest_nombre || null,
+        entro_at: r.entro_at,
+      })),
+    });
+  } catch (e) {
+    res.status(e.message === 'No autorizado.' ? 403 : 400).json({ error: e.message });
+  }
+});
+
+/* Anota un rechazo de la puerta en `puerta_rechazos` (0135).
+ *
+ * Va por argumentos con nombre porque no todos los rechazos tienen boleta: un
+ * QR ilegible o un código mal tecleado no se pueden atar a nadie, y ésos son
+ * justo los que más tiempo cuestan en la fila —hay que teclear, preguntar y
+ * volver a intentar—. Con `ticket` como primer argumento no había forma de
+ * anotarlos, así que no se anotaban y el informe se quedaba con dos motivos de
+ * los seis que ocurren.
+ *
+ * No se espera (`fire and forget`): la puerta tiene una persona delante y
+ * anotar por qué no entró no puede hacerla esperar. Si falla, se avisa por
+ * consola y el escaneo sigue su camino.
  *
  * Sin `await` a propósito: la puerta contesta en el acto y la constancia se
  * escribe detrás. Si falla —la migración sin aplicar, la base lenta— se pierde
  * esa fila y se avisa en el log, pero quien está en la puerta no espera ni ve
  * un error por algo que no es suyo. */
-function anotarRechazo(ticket, operadorId, entroAt, motivo = 'ya_usada_hoy') {
+function anotarRechazo({ eventoId, ticketId = null, motivo, operadorId = null, entroAt = null }) {
+  if (!eventoId || !motivo) return;
   supabase.from('puerta_rechazos').insert({
-    evento_id: ticket.evento_id,
-    ticket_id: ticket.id,
+    evento_id: eventoId,
+    ticket_id: ticketId,
     motivo,
-    operador_id: operadorId || null,
-    entro_at: entroAt || null,
+    operador_id: operadorId,
+    entro_at: entroAt,
   }).then(({ error }) => {
     if (error) console.warn('[puerta] no se pudo anotar el rechazo:', error.message);
   });

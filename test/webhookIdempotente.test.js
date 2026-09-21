@@ -46,8 +46,9 @@ test('lo que mueve números va DESPUÉS de la cerradura', () => {
      mismos nombres y estarían siempre por encima de la cerradura. */
   for (const [que, marca] of [
     ['el consumo del código de descuento', 'await consumirPromocion('],
-    ['la suma al aforo del evento', 'aforo_vendido:'],
-    ['la suma a los vendidos del tipo', 'vendidos: (tt.vendidos'],
+    /* Desde la 0138 las dos sumas son llamadas a la base, no `update`s. */
+    ['la suma al aforo del evento', "rpc('sumar_aforo_vendido'"],
+    ['la suma a los vendidos del tipo', "rpc('sumar_vendidos_tipo'"],
     ['el correo con la entrada', 'enviarEmailEvento({'],
   ]) {
     const i = SRC.indexOf(marca);
