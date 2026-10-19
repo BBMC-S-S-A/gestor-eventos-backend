@@ -1,6 +1,50 @@
-name: CI/CD Pipeline
+# Que el CI revise de verdad lo que dice revisar.
+#
+# ── Las tres cosas que lo volvían decorativo ──────────────────────────────
+#
+#   · `npm install` en vez de `npm ci`. Puede resolver versiones distintas a
+#     las del lock, así que el CI probaba algo que no es exactamente lo que
+#     `.cpanel.yml` instala en el servidor.
+#
+#   · `--if-present` en el lint y en las pruebas. Si alguien borra el script
+#     de package.json, el paso pasa en VERDE sin mirar una sola línea. No es
+#     hipotético: `test/elLintExiste.test.js` cuenta que el paso «Revisar
+#     codigo (Lint)» llevaba desde el primer día pasando en verde porque el
+#     script no existía, y por ese hueco llegó a producción un `ReferenceError`
+#     —una variable `espacioId` que no existe— que mataba el registro de un
+#     evento con un 500 DESPUÉS de haber insertado ya la boleta. La persona
+#     quedaba apuntada viendo un error y lo intentaba otra vez.
+#
+#     Un paso que no puede fallar es peor que no tenerlo, porque se lee como
+#     una garantía.
+#
+#   · Un trabajo «deploy» cuyo único paso era
+#     `echo "Aquí iría la conexión al servidor final"`. Lo mismo: un check en
+#     verde que no comprueba nada y que en la lista de GitHub se ve igual que
+#     uno que sí despliega.
+#
+# ── El despliegue, dicho como es ──────────────────────────────────────────
+#
+# El backend NO se despliega desde aquí. Vive en cPanel y se publica a mano
+# con «Git Version Control → Deploy HEAD Commit», que ejecuta `.cpanel.yml`:
+# guarda el commit en COMMIT.txt —lo lee `/health`—, corre
+# `npm ci --omit=dev` y toca `tmp/restart.txt` para que Passenger recargue.
+#
+# Es manual a propósito: automatizarlo desde aquí necesita credenciales del
+# panel. Decirlo en un comentario vale más que simularlo con un `echo`.
+#
+# ── Por qué el archivo sigue llamándose ci-cd.yml ─────────────────────────
+#
+# Porque `test/elLintExiste.test.js` lo abre por esa ruta. Renombrarlo por
+# cosmética a cambio de romper una referencia que funciona no sale a cuenta.
+# Lo que sí cambia es el nombre del flujo, que antes decía «CI/CD» y ya no
+# despliega nada.
+#
+# `test/elCiCorre.test.js` comprueba que este archivo siga corriendo lo que
+# dice correr, para que no se vuelva a aflojar en silencio.
 
-# Esto le dice a GitHub cuándo ejecutarse: cuando hagan un push o un Pull Request al main
+name: Pruebas
+
 on:
   push:
     branches: [ "main" ]
@@ -8,7 +52,8 @@ on:
     branches: [ "main" ]
 
 jobs:
-  # TAREA 1: Lint y Tests
+  # El id del trabajo se conserva: es el nombre con el que aparece el check en
+  # la lista de GitHub, y cambiarlo deja huérfana cualquier referencia externa.
   build-and-test:
     runs-on: ubuntu-latest
     steps:
@@ -19,20 +64,22 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '22'
+          cache: 'npm'
 
-      - name: Instalar dependencias
-        run: npm install
+      # `npm ci` y no `npm install`: instala exactamente lo del lock. Si el
+      # lock y el package.json no cuadran, falla aquí en vez de instalar otra
+      # cosa y probar algo que no es lo que corre.
+      - name: Instalar
+        run: npm ci
 
-      - name: Revisar codigo (Lint)
-        run: npm run lint --if-present
+      # Sin `--if-present`. Va primero porque es el más rápido y caza lo tonto:
+      # una variable que no existe, un import que sobra.
+      - name: Lint
+        run: npm run lint
 
-      - name: Ejecutar Pruebas (Tests)
-        run: npm test --if-present
-
-  # TAREA 2: Despliegue (Deploy)
-  deploy:
-    needs: build-and-test # Solo se ejecuta si la tarea 1 pasó sin errores
-    runs-on: ubuntu-latest
-    steps:
-      - name: Simular Despliegue a Produccion
-        run: echo "Todo está en verde. Aquí iría la conexión al servidor final."
+      # Las pruebas de Node. Entre ellas, la que pasa lista a TODAS las rutas
+      # que Express tiene registradas y falla si alguna no declara qué permiso
+      # exige (`core/permisos/`). Esa es la que sustituye a RLS el día que la
+      # base deje de ser Supabase.
+      - name: Pruebas
+        run: npm test
