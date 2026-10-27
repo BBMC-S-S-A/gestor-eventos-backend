@@ -2,6 +2,7 @@ SET FOREIGN_KEY_CHECKS = 0;
 
 DROP PROCEDURE IF EXISTS gestek_add_col;
 DROP PROCEDURE IF EXISTS gestek_add_idx;
+DROP PROCEDURE IF EXISTS gestek_add_fk;
 DELIMITER //
 CREATE PROCEDURE gestek_add_col(IN p_tabla VARCHAR(64), IN p_col VARCHAR(64), IN p_def TEXT)
 BEGIN
@@ -20,6 +21,16 @@ BEGIN
     PREPARE st FROM @s; EXECUTE st; DEALLOCATE PREPARE st;
   END IF;
 END //
+CREATE PROCEDURE gestek_add_fk(IN p_tabla VARCHAR(64), IN p_fk VARCHAR(64), IN p_def TEXT)
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM information_schema.table_constraints
+                  WHERE table_schema = DATABASE() AND table_name = p_tabla
+                    AND constraint_name = p_fk AND constraint_type = 'FOREIGN KEY') THEN
+    SET @s = CONCAT('ALTER TABLE `', p_tabla, '` ADD CONSTRAINT `', p_fk, '` FOREIGN KEY ', p_def);
+    PREPARE st FROM @s; EXECUTE st; DEALLOCATE PREPARE st;
+  END IF;
+END //
+
 DELIMITER ;
 
 CALL gestek_add_col('torneos', 'modo_calificacion', "TEXT NULL");
@@ -80,33 +91,40 @@ CALL gestek_add_idx('torneo_calificaciones', 'torneo_calificaciones_equipo_idx',
 CALL gestek_add_idx('torneo_calificaciones', 'torneo_calificaciones_jurado_idx', '`jurado_id`');
 CALL gestek_add_idx('torneo_jurados', 'torneo_jurados_user_id_idx', '`user_id`');
 
-ALTER TABLE `torneo_criterios`
-  ADD CONSTRAINT `torneo_criterios_torneo_id_fkey`
-  FOREIGN KEY (`torneo_id`) REFERENCES `torneos` (`id`) ON DELETE CASCADE;
+CALL gestek_add_fk('torneo_criterios', 'torneo_criterios_torneo_id_fkey',
+                   '(`torneo_id`) REFERENCES `torneos` (`id`) ON DELETE CASCADE');
 
-ALTER TABLE `torneo_rondas`
-  ADD CONSTRAINT `torneo_rondas_torneo_id_fkey`
-  FOREIGN KEY (`torneo_id`) REFERENCES `torneos` (`id`) ON DELETE CASCADE;
+CALL gestek_add_fk('torneo_rondas', 'torneo_rondas_torneo_id_fkey',
+                   '(`torneo_id`) REFERENCES `torneos` (`id`) ON DELETE CASCADE');
 
-ALTER TABLE `torneo_ronda_participantes`
-  ADD CONSTRAINT `torneo_ronda_participantes_ronda_id_fkey`
-  FOREIGN KEY (`ronda_id`) REFERENCES `torneo_rondas` (`id`) ON DELETE CASCADE,
-  ADD CONSTRAINT `torneo_ronda_participantes_equipo_id_fkey`
-  FOREIGN KEY (`equipo_id`) REFERENCES `torneo_equipos` (`id`) ON DELETE CASCADE;
+CALL gestek_add_fk('torneo_ronda_participantes', 'torneo_ronda_participantes_ronda_id_fkey',
+                   '(`ronda_id`) REFERENCES `torneo_rondas` (`id`) ON DELETE CASCADE, ADD CONSTRAINT `torneo_ronda_participantes_equipo_id_fkey` FOREIGN KEY (`equipo_id`) REFERENCES `torneo_equipos` (`id`) ON DELETE CASCADE');
 
-ALTER TABLE `torneo_jurados`
-  ADD CONSTRAINT `torneo_jurados_torneo_id_fkey`
-  FOREIGN KEY (`torneo_id`) REFERENCES `torneos` (`id`) ON DELETE CASCADE;
+CALL gestek_add_fk('torneo_jurados', 'torneo_jurados_torneo_id_fkey',
+                   '(`torneo_id`) REFERENCES `torneos` (`id`) ON DELETE CASCADE');
 
-ALTER TABLE `torneo_calificaciones`
-  ADD CONSTRAINT `torneo_calificaciones_ronda_id_fkey`
-  FOREIGN KEY (`ronda_id`) REFERENCES `torneo_rondas` (`id`) ON DELETE CASCADE,
-  ADD CONSTRAINT `torneo_calificaciones_criterio_id_fkey`
-  FOREIGN KEY (`criterio_id`) REFERENCES `torneo_criterios` (`id`) ON DELETE CASCADE,
-  ADD CONSTRAINT `torneo_calificaciones_equipo_id_fkey`
-  FOREIGN KEY (`equipo_id`) REFERENCES `torneo_equipos` (`id`) ON DELETE CASCADE;
+CALL gestek_add_fk('torneo_calificaciones', 'torneo_calificaciones_ronda_id_fkey',
+                   '(`ronda_id`) REFERENCES `torneo_rondas` (`id`) ON DELETE CASCADE, ADD CONSTRAINT `torneo_calificaciones_criterio_id_fkey` FOREIGN KEY (`criterio_id`) REFERENCES `torneo_criterios` (`id`) ON DELETE CASCADE, ADD CONSTRAINT `torneo_calificaciones_equipo_id_fkey` FOREIGN KEY (`equipo_id`) REFERENCES `torneo_equipos` (`id`) ON DELETE CASCADE');
 
 DROP PROCEDURE IF EXISTS gestek_add_col;
 DROP PROCEDURE IF EXISTS gestek_add_idx;
+DROP PROCEDURE IF EXISTS gestek_add_fk;
 
 SET FOREIGN_KEY_CHECKS = 1;
+
+/* ── Nota del 27-oct ───────────────────────────────────────────────────
+ *
+ * Las claves foráneas de arriba preguntan antes de crear. Antes iban con un
+ * `ALTER TABLE` pelado, y desde la regeneración del volcado del 15-sep eso
+ * fallaba SIEMPRE en una carga normal: las cuatro tablas de este archivo
+ * —`torneo_criterios`, `torneo_rondas`, `torneo_ronda_participantes`,
+ * `torneo_calificaciones`— **ya vienen en `01_tablas.sql`**, y sus claves en
+ * `05_claves_foraneas.sql`.
+ *
+ * Medido: `ERROR 1826 · Duplicate foreign key constraint name
+ * 'torneo_criterios_torneo_id_fkey'`. Y como el cliente de MySQL se para en el
+ * primer error, lo que viniera detrás se quedaba sin aplicar.
+ *
+ * Este archivo sigue haciendo falta para quien cargue un volcado anterior al
+ * 15-sep. Con el de ahora, no hace nada — que es exactamente lo que tiene que
+ * hacer. */

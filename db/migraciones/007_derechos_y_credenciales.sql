@@ -32,6 +32,7 @@ SET FOREIGN_KEY_CHECKS = 0;
 
 DROP PROCEDURE IF EXISTS gestek_add_col;
 DROP PROCEDURE IF EXISTS gestek_add_idx;
+DROP PROCEDURE IF EXISTS gestek_add_fk;
 DELIMITER //
 CREATE PROCEDURE gestek_add_col(IN p_tabla VARCHAR(64), IN p_col VARCHAR(64), IN p_def TEXT)
 BEGIN
@@ -50,6 +51,16 @@ BEGIN
     PREPARE st FROM @s; EXECUTE st; DEALLOCATE PREPARE st;
   END IF;
 END //
+CREATE PROCEDURE gestek_add_fk(IN p_tabla VARCHAR(64), IN p_fk VARCHAR(64), IN p_def TEXT)
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM information_schema.table_constraints
+                  WHERE table_schema = DATABASE() AND table_name = p_tabla
+                    AND constraint_name = p_fk AND constraint_type = 'FOREIGN KEY') THEN
+    SET @s = CONCAT('ALTER TABLE `', p_tabla, '` ADD CONSTRAINT `', p_fk, '` FOREIGN KEY ', p_def);
+    PREPARE st FROM @s; EXECUTE st; DEALLOCATE PREPARE st;
+  END IF;
+END //
+
 DELIMITER ;
 
 -- ── 1 · 0125 · El vaivén es de cada persona ────────────────────────────
@@ -132,8 +143,28 @@ CREATE TABLE IF NOT EXISTS `derecho_ventanas` (
 --   · `ventana_key` la ventana, o una cadena fija cuando no hay ventana
 --
 -- Con las dos, un solo índice único cubre los dos casos que en Postgres
--- necesitaban dos índices parciales. Son `STORED` y no `VIRTUAL` porque MySQL
--- 8 no admite índices únicos sobre columnas virtuales.
+-- necesitaban dos índices parciales.
+--
+-- ── Son `VIRTUAL`, y antes decían `STORED` ─────────────────────────────
+--
+-- El motivo que estaba escrito aquí —«MySQL 8 no admite índices únicos sobre
+-- columnas virtuales»— **no es cierto**. Comprobado contra MySQL 8.0.46: un
+-- `UNIQUE KEY` sobre una columna VIRTUAL se crea sin protestar y rechaza el
+-- duplicado como debe.
+--
+-- Y `STORED` rompía este archivo. MySQL prohíbe poner una clave foránea sobre
+-- la columna BASE de una columna generada almacenada, así que el bloque de
+-- claves foráneas del §4 moría con:
+--
+--     ERROR 3192 · Cannot add foreign key on the base column of stored column
+--
+-- Las tres columnas de las que comen estas dos —`puesto_id`, `ticket_id`,
+-- `ventana_id`— son justamente las que llevan clave foránea. Con el cliente de
+-- MySQL parándose en el primer error, `derecho_consumos` se quedaba SIN
+-- NINGUNA de sus cuatro claves foráneas, y `ticket_movimientos` sin la suya.
+--
+-- Con `VIRTUAL` desaparece la restricción, el único sigue valiendo igual, y de
+-- paso no se ocupa disco: el motor las calcula al leer.
 
 CREATE TABLE IF NOT EXISTS `derecho_consumos` (
   `id` CHAR(36) NOT NULL,
@@ -152,8 +183,8 @@ CREATE TABLE IF NOT EXISTS `derecho_consumos` (
   -- Las dos que hacen posible la regla. No se escriben nunca a mano: las
   -- calcula el motor a partir de las de arriba, así que no se pueden quedar
   -- desacordadas con ellas.
-  `titular_id`  CHAR(36) GENERATED ALWAYS AS (COALESCE(`puesto_id`, `ticket_id`)) STORED,
-  `ventana_key` CHAR(36) GENERATED ALWAYS AS (COALESCE(`ventana_id`, '-')) STORED,
+  `titular_id`  CHAR(36) GENERATED ALWAYS AS (COALESCE(`puesto_id`, `ticket_id`)) VIRTUAL,
+  `ventana_key` CHAR(36) GENERATED ALWAYS AS (COALESCE(`ventana_id`, '-')) VIRTUAL,
 
   PRIMARY KEY (`id`),
   UNIQUE KEY `derecho_consumo_unico` (`derecho_id`, `ventana_key`, `titular_id`, `uso_num`),
@@ -167,32 +198,29 @@ CREATE TABLE IF NOT EXISTS `derecho_consumos` (
 -- Aparte y al final, como en la 006: si una tabla referida todavía no está
 -- cargada, esto falla ruidosamente en vez de dejar tablas a medias.
 
-ALTER TABLE `derechos`
-  ADD CONSTRAINT `derechos_evento_id_fkey`
-  FOREIGN KEY (`evento_id`) REFERENCES `eventos` (`id`) ON DELETE CASCADE;
+CALL gestek_add_fk('derechos', 'derechos_evento_id_fkey',
+                   '(`evento_id`) REFERENCES `eventos` (`id`) ON DELETE CASCADE');
 
-ALTER TABLE `derecho_ventanas`
-  ADD CONSTRAINT `derecho_ventanas_derecho_id_fkey`
-  FOREIGN KEY (`derecho_id`) REFERENCES `derechos` (`id`) ON DELETE CASCADE,
-  ADD CONSTRAINT `derecho_ventanas_evento_id_fkey`
-  FOREIGN KEY (`evento_id`) REFERENCES `eventos` (`id`) ON DELETE CASCADE;
+CALL gestek_add_fk('derecho_ventanas', 'derecho_ventanas_derecho_id_fkey',
+                   '(`derecho_id`) REFERENCES `derechos` (`id`) ON DELETE CASCADE');
+CALL gestek_add_fk('derecho_ventanas', 'derecho_ventanas_evento_id_fkey',
+                   '(`evento_id`) REFERENCES `eventos` (`id`) ON DELETE CASCADE');
 
-ALTER TABLE `derecho_consumos`
-  ADD CONSTRAINT `derecho_consumos_derecho_id_fkey`
-  FOREIGN KEY (`derecho_id`) REFERENCES `derechos` (`id`) ON DELETE CASCADE,
-  ADD CONSTRAINT `derecho_consumos_ventana_id_fkey`
-  FOREIGN KEY (`ventana_id`) REFERENCES `derecho_ventanas` (`id`) ON DELETE CASCADE,
-  ADD CONSTRAINT `derecho_consumos_ticket_id_fkey`
-  FOREIGN KEY (`ticket_id`) REFERENCES `tickets` (`id`) ON DELETE CASCADE,
-  ADD CONSTRAINT `derecho_consumos_puesto_id_fkey`
-  FOREIGN KEY (`puesto_id`) REFERENCES `ticket_puestos` (`id`) ON DELETE CASCADE;
+CALL gestek_add_fk('derecho_consumos', 'derecho_consumos_derecho_id_fkey',
+                   '(`derecho_id`) REFERENCES `derechos` (`id`) ON DELETE CASCADE');
+CALL gestek_add_fk('derecho_consumos', 'derecho_consumos_ventana_id_fkey',
+                   '(`ventana_id`) REFERENCES `derecho_ventanas` (`id`) ON DELETE CASCADE');
+CALL gestek_add_fk('derecho_consumos', 'derecho_consumos_ticket_id_fkey',
+                   '(`ticket_id`) REFERENCES `tickets` (`id`) ON DELETE CASCADE');
+CALL gestek_add_fk('derecho_consumos', 'derecho_consumos_puesto_id_fkey',
+                   '(`puesto_id`) REFERENCES `ticket_puestos` (`id`) ON DELETE CASCADE');
 
-ALTER TABLE `ticket_movimientos`
-  ADD CONSTRAINT `ticket_movimientos_puesto_id_fkey`
-  FOREIGN KEY (`puesto_id`) REFERENCES `ticket_puestos` (`id`) ON DELETE CASCADE;
+CALL gestek_add_fk('ticket_movimientos', 'ticket_movimientos_puesto_id_fkey',
+                   '(`puesto_id`) REFERENCES `ticket_puestos` (`id`) ON DELETE CASCADE');
 
 DROP PROCEDURE IF EXISTS gestek_add_col;
 DROP PROCEDURE IF EXISTS gestek_add_idx;
+DROP PROCEDURE IF EXISTS gestek_add_fk;
 
 SET FOREIGN_KEY_CHECKS = 1;
 

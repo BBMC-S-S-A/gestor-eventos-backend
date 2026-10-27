@@ -152,13 +152,45 @@ with cols as (
          c.numeric_precision as prec,
          c.numeric_scale as escala,
          c.column_default like 'nextval(%' as serie,
-         exists (
+         /* Indexada = «MySQL va a necesitar poder indexar esto», que no es lo
+            mismo que «Postgres la tiene indexada hoy».
+
+            La diferencia son las claves foraneas: Postgres NO crea indice en
+            la columna hija de una FK, y MySQL si — lo necesita para poder
+            comprobarla. Mirando solo pg_index, una columna de texto que esta
+            en una FK y en ningun indice salia TEXT, y despues MySQL rechazaba
+            la clave con:
+
+                ERROR 1170 · BLOB/TEXT column used in key specification
+                             without a key length
+
+            Medido: pasaba con `oauth_codes.client_id` y `oauth_tokens.client_id`,
+            que apuntan a `oauth_clients.client_id`. El fallo salia al cargar
+            `05b_faltantes.sql`, o sea despues de los datos, y dejaba esas dos
+            tablas sin su clave foranea.
+
+            Se mira tambien el lado referenciado: suele ser la clave primaria
+            y por tanto ya indexado, pero si alguna vez apunta a un unico sobre
+            texto, el mismo problema aparece del otro lado. */
+         (exists (
            select 1 from pg_index i
            join pg_class cl on cl.oid = i.indrelid
            join pg_namespace ns on ns.oid = cl.relnamespace and ns.nspname = 'public'
            join pg_attribute a on a.attrelid = cl.oid and a.attnum = any(i.indkey)
            where cl.relname = c.table_name and a.attname = c.column_name
-         ) as indexada,
+         ) or exists (
+           select 1 from pg_constraint fk
+           join pg_class clh on clh.oid = fk.conrelid
+           join pg_namespace nsh on nsh.oid = clh.relnamespace and nsh.nspname = 'public'
+           join pg_attribute ah on ah.attrelid = clh.oid and ah.attnum = any(fk.conkey)
+           where fk.contype = 'f' and clh.relname = c.table_name and ah.attname = c.column_name
+         ) or exists (
+           select 1 from pg_constraint fk
+           join pg_class clp on clp.oid = fk.confrelid
+           join pg_namespace nsp on nsp.oid = clp.relnamespace and nsp.nspname = 'public'
+           join pg_attribute ap on ap.attrelid = clp.oid and ap.attnum = any(fk.confkey)
+           where fk.contype = 'f' and clp.relname = c.table_name and ap.attname = c.column_name
+         )) as indexada,
          /* Que tablas mantienen `updated_at` con un disparador HOY. No se
             deduce del nombre de la columna: 16 tablas tienen `updated_at`
             pero solo 5 lo tocan con disparador; en las otras 11 lo escribe el

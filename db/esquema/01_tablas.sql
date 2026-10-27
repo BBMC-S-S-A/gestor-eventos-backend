@@ -569,7 +569,7 @@ CREATE TABLE `oauth_clients` (
 
 CREATE TABLE `oauth_codes` (
   `code_hash` VARCHAR(255) NOT NULL,
-  `client_id` TEXT NOT NULL,
+  `client_id` VARCHAR(255) NOT NULL,
   `owner_id` CHAR(36) NOT NULL,
   `redirect_uri` TEXT NOT NULL,
   `code_challenge` TEXT NOT NULL,
@@ -585,7 +585,7 @@ CREATE TABLE `oauth_tokens` (
   `id` CHAR(36) NOT NULL,
   `token_hash` VARCHAR(255) NOT NULL,
   `refresh_hash` VARCHAR(255) NULL,
-  `client_id` TEXT NOT NULL,
+  `client_id` VARCHAR(255) NOT NULL,
   `owner_id` CHAR(36) NOT NULL,
   `scope` TEXT NULL,
   `expira_at` DATETIME(6) NOT NULL,
