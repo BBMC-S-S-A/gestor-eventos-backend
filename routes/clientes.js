@@ -1,6 +1,7 @@
 const express = require('express');
 const { exige, sesion, permisosDeMiembro, SELECT_PERMISOS } = require('../core/permisos');
 const supabase = require('../lib/supabase.js');
+const contadores = require('../lib/contadores.js');
 const sillaDeLaCompra = require('../lib/sillaDeLaCompra.js');
 const { personasDeTicket } = require('../lib/cuantasPersonas.js');
 const { verifySupabaseJWT } = require('../middleware/auth.js');
@@ -46,6 +47,32 @@ router.use(verifySupabaseJWT);
 const { rutaDe, paraExportar, BUCKET_PRIVADO, SEGUNDOS_FIRMA } = require('../lib/archivoDeFormulario.js');
 
 const PERMS_CLIENTES = ['gestionar_clientes'];
+
+/* Leer la lista. Separado de escribirla, que es `PERMS_CLIENTES`.
+ *
+ * ── Por qué existe esta constante ────────────────────────────────────────
+ *
+ * Porque el listado NO aceptaba `ver_clientes` y tenía que aceptarlo. El
+ * comentario de arriba lo dice desde hace tiempo —«el listado acepta también
+ * ver_clientes»— y el código pedía sólo `gestionar_clientes`: la intención
+ * estaba escrita y nunca se cumplió.
+ *
+ * Lo que eso dejaba fuera: Puerta, VIP host, Coordinador, Finanzas y
+ * Coordinación de expositores. Los cinco tienen `ver_clientes` —el permiso que
+ * por su nombre sirve justamente para esto— y ninguno podía abrir la pantalla.
+ *
+ * Y lo que lo vuelve indefendible como frontera de seguridad: **exportar sí lo
+ * aceptaba**. `GET /clientes/exportar` pide `['ver_clientes','gestionar_clientes']`
+ * desde siempre. O sea que un VIP host podía descargarse la lista entera en un
+ * archivo y no podía mirarla en el panel. Eso no protege nada; sólo estorba.
+ *
+ * Reportado desde producción el 27-oct: un 403 en
+ * `GET /eventos/:id/clientes?limit=1` para un miembro con rol «VIP host».
+ *
+ * Las ESCRITURAS no se mueven. Editar, reenviar e importar siguen pidiendo
+ * `gestionar_clientes`, y borrar sigue aparte con `borrar_boletas`. */
+const PERMS_VER_CLIENTES = ['gestionar_clientes', 'ver_clientes'];
+
 /* Borrar va aparte de atender: quien reenvía boletas y corrige datos todo el
    día no tiene por qué poder borrar de paso. */
 const PERMS_BORRAR = ['borrar_boletas'];
@@ -205,7 +232,7 @@ function fechaValida(v) {
   return Number.isNaN(t.getTime()) ? null : t.toISOString();
 }
 
-router.get('/:eventoId/clientes', exige(PERMS_CLIENTES), async (req, res) => {
+router.get('/:eventoId/clientes', exige(PERMS_VER_CLIENTES), async (req, res) => {
   const { eventoId } = req.params;
   const { q, estado, ticket_type_id, cursor, impresa, desde } = req.query;
   /* Cuántas y cuál página, saneadas.
@@ -562,12 +589,9 @@ router.delete('/:eventoId/clientes/:ticketId', exige(PERMS_BORRAR), async (req, 
  * iba el evento. El suelo en cero lo pone ahora la propia función. */
 async function ajustarAforo(eventoId, ticketTypeId, delta, personas = 1) {
   if (ticketTypeId) {
-    await supabase.rpc('sumar_vendidos_tipo', { p_tipo: ticketTypeId, p_delta: delta });
+    await contadores.sumarVendidosTipo(ticketTypeId, delta);
   }
-  await supabase.rpc('sumar_aforo_vendido', {
-    p_evento: eventoId,
-    p_delta : delta * Math.max(1, personas),
-  });
+  await contadores.sumarAforoVendido(eventoId, delta * Math.max(1, personas));
 }
 
 /* POST /eventos/:eventoId/clientes/importar — import masivo desde CSV.
@@ -1036,9 +1060,9 @@ router.post('/:eventoId/clientes/importar', exige(PERMS_CLIENTES), async (req, r
       /* Un import va en una sola tanda, pero puede coincidir con las ventas de
          la página, que siguen entrando mientras esto corre. Mismo motivo que
          en `ajustarAforo`: se suma en la base. Ver 0138. */
-      await supabase.rpc('sumar_vendidos_tipo', { p_tipo: tipo.id, p_delta: ok.length });
+      await contadores.sumarVendidosTipo(tipo.id, ok.length);
       if (marcar_pagado) {
-        await supabase.rpc('sumar_aforo_vendido', { p_evento: eventoId, p_delta: ok.length });
+        await contadores.sumarAforoVendido(eventoId, ok.length);
       }
 
       const organizadorId = evImp && evImp.owner_id;

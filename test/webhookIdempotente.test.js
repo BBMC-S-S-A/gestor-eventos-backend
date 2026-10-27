@@ -29,12 +29,24 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 
-const SRC = fs.readFileSync(path.join(__dirname, '..', 'lib', 'confirmarTicket.js'), 'utf8');
+const CRUDO = fs.readFileSync(path.join(__dirname, '..', 'lib', 'confirmarTicket.js'), 'utf8');
+
+/* Sin comentarios para medir POSICIONES.
+ *
+ * La prueba de orden de más abajo ancla en `neq('estado', 'pagado')`, y ese
+ * texto aparece DOS veces en el archivo: en el comentario que explica la
+ * cerradura (línea 29) y en la cerradura de verdad (línea 36). Midiendo sobre
+ * el texto crudo, `indexOf` daba la del comentario, y cualquier cosa que se
+ * colara entre las dos pasaba por «después de la cerradura» estando antes.
+ *
+ * Medido el 27-oct: con el aforo movido a esa franja, la prueba seguía verde.
+ * Quitando los comentarios, la caza. */
+const SRC = CRUDO.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
 
 test('la marca de pagada es la cerradura, no una comprobación previa', () => {
-  assert.match(SRC, /\.eq\('id', ticketId\)\.neq\('estado', 'pagado'\)\.select\('id'\)/,
+  assert.match(CRUDO, /\.eq\('id', ticketId\)\.neq\('estado', 'pagado'\)\.select\('id'\)/,
     'volvió a marcarse como pagada sin condición: dos avisos a la vez cobran dos veces');
-  assert.match(SRC, /if \(!marcada \|\| marcada\.length === 0\) \{/,
+  assert.match(CRUDO, /if \(!marcada \|\| marcada\.length === 0\) \{/,
     'no se mira si el update tocó alguna fila: el segundo aviso seguiría adelante igual');
 });
 
@@ -46,9 +58,11 @@ test('lo que mueve números va DESPUÉS de la cerradura', () => {
      mismos nombres y estarían siempre por encima de la cerradura. */
   for (const [que, marca] of [
     ['el consumo del código de descuento', 'await consumirPromocion('],
-    /* Desde la 0138 las dos sumas son llamadas a la base, no `update`s. */
-    ['la suma al aforo del evento', "rpc('sumar_aforo_vendido'"],
-    ['la suma a los vendidos del tipo', "rpc('sumar_vendidos_tipo'"],
+    /* Desde la 0138 las dos sumas son llamadas a la base, no `update`s, y
+       desde el cableado del 27-oct pasan por `lib/contadores.js`. Lo que se
+       comprueba sigue siendo lo mismo: que ocurran DESPUÉS de la cerradura. */
+    ['la suma al aforo del evento', 'contadores.sumarAforoVendido('],
+    ['la suma a los vendidos del tipo', 'contadores.sumarVendidosTipo('],
     ['el correo con la entrada', 'enviarEmailEvento({'],
   ]) {
     const i = SRC.indexOf(marca);

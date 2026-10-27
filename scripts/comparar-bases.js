@@ -60,7 +60,9 @@ const crypto = require('crypto');
    se cargara al importar, exigiría sus variables y el archivo entero dejaría
    de poder probarse. */
 const clientes = {
-  get supabase() { return require('../lib/supabase.js'); },
+  /* El cliente DE VERDAD: con `DATOS_PROPIOS` encendida, la costura
+     devolvería el adaptador y este script compararía MySQL contra MySQL. */
+  get supabase() { return require('../lib/supabaseCliente.js'); },
   get bd()       { return require('../core/db/mysql.js').bd; },
 };
 

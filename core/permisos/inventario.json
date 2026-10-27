@@ -1,6 +1,6 @@
 {
   "pendientes_maximo": 0,
-  "censado_el": "2026-10-19",
+  "censado_el": "2026-10-27",
   "total": 378,
   "rutas": {
     "GET /": {
@@ -999,7 +999,8 @@
     "GET /eventos/:eventoId/clientes": {
       "estado": "exige",
       "acciones": [
-        "gestionar_clientes"
+        "gestionar_clientes",
+        "ver_clientes"
       ]
     },
     "PATCH /eventos/:eventoId/clientes/:ticketId": {

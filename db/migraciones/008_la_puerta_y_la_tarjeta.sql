@@ -293,7 +293,7 @@ UPDATE `tickets` SET `primer_ingreso_at` = `checked_in_at`
 --
 --   **Hoy `modules/contadores/index.js` NO las tiene.** Cubre la cuota de
 --   stands, los inscritos a sesiones y el canje de recompensas; `aforo_vendido`
---   y `vendidos` no aparecen. Y hay **diez llamadas** a esas dos funciones en
+--   y `vendidos` no aparecen. Y hay **trece llamadas** a esas dos funciones en
 --   el código (`lib/confirmarTicket.js`, `lib/agente.js`,
 --   `routes/eventos.publicos.js`, `routes/clientes.js`, `routes/pagos.js`),
 --   todas por `supabase.rpc(...)`.
@@ -306,9 +306,15 @@ UPDATE `tickets` SET `primer_ingreso_at` = `checked_in_at`
 --   estar hecho antes del corte**, y es la razón por la que esta nota ocupa
 --   veinte líneas en vez de dos.
 --
---   (Hecho el 27-oct: `modules/contadores/` ya trae `sumarAforoVendido()` y
---   `sumarVendidosTipo()`. Lo que sigue pendiente es cablear las diez llamadas
---   para que dejen de ir por `supabase.rpc` cuando mande MySQL.)
+--   (Hecho el 27-oct: `modules/contadores/` trae `sumarAforoVendido()` y
+--   `sumarVendidosTipo()`, y las llamadas ya están cableadas — pasan todas por
+--   `lib/contadores.js`, que decide el motor según `DATOS_PROPIOS`.
+--
+--   Y son TRECE, no diez: el conteo de diez que decía antes esta nota salió de
+--   contar líneas de un `grep` donde una de las llamadas ocupa cuatro. Las
+--   trece están contadas archivo por archivo en
+--   `test/contadoresCableados.test.js`, que falla si aparece una catorceava
+--   sin pasar por la costura.)
 --
 -- **0139 · el camino de búsqueda de las diez.** Fija el `search_path` de diez
 -- funciones de Postgres. **MySQL no tiene `search_path`**: una conexión se abre

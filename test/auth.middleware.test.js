@@ -23,7 +23,11 @@ const assert = require('node:assert');
 
 /* Se sustituye `lib/supabase.js` en la caché de módulos ANTES de cargar el
    middleware, para poder contar las llamadas sin salir a la red. */
-const rutaSupabase = require.resolve('../lib/supabase.js');
+/* El cliente DE VERDAD, que es el que usa `middleware/auth.js`: el login va
+   por ahí mientras `AUTH_PROPIA` esté apagada, no por la costura de datos
+   —si fuera por la costura, encender `DATOS_PROPIOS` dejaría sin `.auth` a
+   todas las peticiones—. */
+const rutaSupabase = require.resolve('../lib/supabaseCliente.js');
 let llamadasASupabase = 0;
 let respuestaDeSupabase = { data: { user: { id: 'usuario-de-supabase', email: 'viejo@ejemplo.com' } }, error: null };
 

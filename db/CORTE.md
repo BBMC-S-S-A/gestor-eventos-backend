@@ -308,6 +308,32 @@ pierde los microsegundos de una fecha o que convierte un `null` en cadena
 vacía deja exactamente el mismo número de filas. El día del evento eso es un
 nombre cortado en una escarapela.
 
+### 4.4 · 🚦 El OTRO paso que decide
+
+El de arriba dice si los datos llegaron intactos. Éste dice otra cosa: si las
+**consultas** los ven igual.
+
+```bash
+node scripts/comparar-consultas.js --evento=<uuid de un evento con datos> --detalle
+```
+
+Corre 24 consultas reales del código contra PostgREST y contra el adaptador de
+MySQL y compara lo que devuelven, fila a fila y campo a campo —bajando también
+por los embebidos—. Sale con **código 1** si algo no cuadra.
+
+> **Sólo lee.** Cada consulta se comprueba antes de correrla: si no es un
+> `select`, el script para. De las funciones sólo entran las de lectura.
+
+| Resultado | Qué hacer |
+|---|---|
+| **Todo igual** | ✅ Siga al §5 |
+| Alguna difiere | 🛑 **PARE.** Cada diferencia es una consulta que el día del evento devolvería otra cosa — y ninguna daría error |
+
+**Por qué hacen falta los dos:** se pueden haber cargado los datos perfectos y
+aun así una consulta devolver de más o de menos, porque un filtro se tradujo
+mal o un embebido volvió como lista en vez de objeto. El primero mira la
+carga; éste mira el adaptador.
+
 ---
 ## 5 · Las cuentas
 
@@ -362,7 +388,7 @@ Dos interruptores, **y el orden importa**.
 
 ### 6.1 · Google, primero
 
-Consola de Google → *Credenciales* → el cliente OAuth **que ya usa Supabase**
+Consola de Google → *Credenciales* → el cliente OAuth que se vaya a usar
 → *URI de redirección autorizados* → **añadir** (no sustituir):
 
 ```
@@ -372,12 +398,60 @@ https://api.gestekeventost.dpdns.org/auth/google/callback
 **Se añade, no se cambia:** mientras Supabase siga encendido, su URI tiene que
 seguir ahí.
 
-**El `client_id` tiene que ser el mismo.** Google identifica a cada persona con
-un `sub` distinto por cada cliente. Con un cliente nuevo, los 22 `sub` que se
-migraron no coinciden con nada, y esas 22 personas entrarían a **cuentas
-nuevas y vacías**, con sus eventos dentro de las viejas.
+**El `client_id` NO tiene que ser el mismo.** Aquí decía lo contrario y era
+falso; de esa frase salió el bloqueo de octubre. Google declara
+`subject_types_supported: ["public"]`, o sea el **mismo `sub` para todos los
+clientes** (OIDC Core §8). Los `sub` migrados valen con cualquiera, así que se
+puede usar «GESTEK backend» (`1041688673678-…`) en vez del cliente del
+proyecto `558760544025`, que quedó sin dueño accesible.
 
-### 6.2 · El backend
+Comprobarlo el día del corte, que es gratis y tarda un segundo:
+
+```bash
+curl -s https://accounts.google.com/.well-known/openid-configuration \
+  | grep -o '"subject_types_supported":[^]]*]'
+# "subject_types_supported":["public"]
+```
+
+**Y mirar el registro en la primera hora.** Cada vez que alguien entre con un
+`sub` que no estaba guardado, sale
+`[auth/google] identidad re-enlazada por correo: usuario=… sub=…`. Un puñado
+es normal (quien tenía contraseña y pulsa Google). **Ochenta y dos en una
+hora significa que el `sub` cambió** — la gente entra igual, por el correo
+verificado, pero hay que saberlo.
+
+### 6.2 · 🚦 El correo, ANTES de encender la identidad
+
+Con la identidad propia, el correo deja de ser un adorno: es **el único camino
+de vuelta** para quien entra con contraseña. Medido contra producción el
+27-oct: **14 personas**. Los otros 82 entran con Google y no dependen de esto.
+
+Si el SMTP está mal, la pantalla de «olvidé mi contraseña» contesta *«te
+llegará un enlace»* igual —contestar distinto delataría qué direcciones tienen
+cuenta— y **el enlace no sale**. Esas 14 personas se quedan fuera sin que nadie
+se entere.
+
+Ponga en cPanel → *Setup Node.js App* → *Environment variables*:
+
+```
+CPANEL_SMTP_HOST=mail.gestekeventost.dpdns.org
+CPANEL_SMTP_PORT=465
+CPANEL_SMTP_USER=no-responder@gestekeventost.dpdns.org
+CPANEL_SMTP_PASS=…
+```
+
+Y compruébelo **antes** de tocar `AUTH_PROPIA`:
+
+```bash
+node scripts/probar-smtp.js
+```
+
+| Resultado | Qué hacer |
+|---|---|
+| Conecta y manda | ✅ Siga al 6.3 |
+| Falla | 🛑 **PARE.** No encienda `AUTH_PROPIA` hasta arreglarlo. El mensaje dice qué falta |
+
+### 6.3 · El backend
 
 En cPanel → *Setup Node.js App* → *Environment variables*:
 
@@ -388,7 +462,26 @@ AUTH_PROPIA=true
 Y **reiniciar la aplicación** (Passenger lee las variables al reiniciar, no al
 guardarlas).
 
-**Tiene que salir en el log:** `[auth] identidad propia montada en /auth`
+**Tienen que salir en el log las DOS líneas:**
+
+```
+[auth] identidad propia montada en /auth
+[auth] el correo sale: Conexión correcta con mail.…:465
+```
+
+Si en vez de la segunda sale `[auth][CORREO] NO se puede mandar correo`,
+apague `AUTH_PROPIA` y vuelva al 6.2: con esa línea en el log, quien olvide su
+contraseña no puede recuperarla.
+
+**Y durante la primera hora, mire esto:**
+
+```bash
+curl -s https://api.gestekeventost.dpdns.org/health | grep -o '"correos_fallidos":{[^}]*}'
+```
+
+`total` tiene que quedarse en 0. Si sube, hay gente esperando un enlace que no
+va a llegar, y en el log del cPanel sale `[auth][CORREO-NO-SALIO]` con a quién
+iba — que es lo único que permite avisarles por otro medio.
 
 ```bash
 curl -s https://api.gestekeventost.dpdns.org/auth/login \
@@ -484,12 +577,20 @@ que el §4 tenga sentido. Al 27 de octubre:
 | Esquema MySQL al día hasta la 0138 (`008`) | ✅ hecho |
 | Sumas atómicas de lo vendido en `modules/contadores/` | ✅ hecho |
 | Semillas de evento (roles, canales) en `modules/eventos/semillas.js` | ✅ hecho |
-| **Cablear las rutas a MySQL en vez de a `supabase.rpc`** | ⬜ **falta** |
-| **Las 8 columnas `ARRAY` → `JSON`**: lo que hoy se consulta con `@>` o `= ANY()` hay que reescribirlo con `JSON_CONTAINS` / `MEMBER OF` | ⬜ **falta** |
+| Lo vendido: las 13 llamadas pasan por `lib/contadores.js` y obedecen a `DATOS_PROPIOS` | ✅ hecho |
+| **Cablear el RESTO de las rutas a MySQL** — 1.152 llamadas en 95 archivos, medido. El frente y los dos caminos, en `EL-RESTO-DE-LAS-RUTAS.md` | ⬜ **falta** |
+| Las 8 columnas `ARRAY` → `JSON` | ✅ hecho — resultó ser una sola consulta; ver NOTAS-ESQUEMA |
 | Los 5 uploaders del frontend, que hoy suben directo a Supabase | ⬜ falta (va con el §7) |
 
-La de los `ARRAY` es la que más cuidado pide: `event_members.custom_permissions`
-la lee `core/permisos/cargarEvento()`, o sea **el guardia de las 378 rutas**.
-Cuando se toque, la prueba de permisos tiene que seguir en verde.
+La de los `ARRAY` se creía la más brava —`event_members.custom_permissions`
+la lee `core/permisos/cargarEvento()`, el guardia de las 378 rutas— y medida
+resultó ser la más pequeña: leerlas no cambia nada (mysql2 entrega la columna
+JSON como array de JS), escribirlas pide `JSON.stringify` y falla ruidoso si
+se olvida, y consultarlas con operadores de Postgres había **una sola vez** en
+todo el código. El detalle, en `migraciones/NOTAS-ESQUEMA.md`.
 
-El detalle de las ocho columnas está en `migraciones/NOTAS-ESQUEMA.md`.
+Así que lo único grande que queda de verdad es **el resto de las rutas**.
+Medido el 27-oct: **1.152 llamadas en 95 archivos sobre 86 tablas**, no los 43
+archivos que decía esta tabla —ése era el número de archivos que *mencionan*
+supabase, no los que consultan—. El frente entero, los dos caminos posibles y
+la recomendación están en [`EL-RESTO-DE-LAS-RUTAS.md`](EL-RESTO-DE-LAS-RUTAS.md).

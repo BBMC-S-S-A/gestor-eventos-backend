@@ -28,7 +28,11 @@
    Cuando no queden tokens de Supabase vivos, o sea 30 días después de apagar
    su emisión. Entonces se borra `porSupabase` y esto son diez líneas. */
 
-const supabase = require('../lib/supabase.js');
+/* El cliente DE VERDAD, no la costura de datos: mientras `AUTH_PROPIA` esté
+   apagada esto llama a `supabase.auth.getUser()`, y el adaptador de MySQL
+   lanza ahí a propósito. Si fuera por la costura, encender `DATOS_PROPIOS`
+   dejaría sin login TODAS las peticiones. */
+const supabase = require('../lib/supabaseCliente.js');
 const config = require('../core/config');
 
 /* Se importa perezosamente para no arrastrar el módulo entero (y su Router de
