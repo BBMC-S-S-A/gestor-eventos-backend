@@ -308,6 +308,32 @@ pierde los microsegundos de una fecha o que convierte un `null` en cadena
 vacía deja exactamente el mismo número de filas. El día del evento eso es un
 nombre cortado en una escarapela.
 
+### 4.4 · 🚦 El OTRO paso que decide
+
+El de arriba dice si los datos llegaron intactos. Éste dice otra cosa: si las
+**consultas** los ven igual.
+
+```bash
+node scripts/comparar-consultas.js --evento=<uuid de un evento con datos> --detalle
+```
+
+Corre 24 consultas reales del código contra PostgREST y contra el adaptador de
+MySQL y compara lo que devuelven, fila a fila y campo a campo —bajando también
+por los embebidos—. Sale con **código 1** si algo no cuadra.
+
+> **Sólo lee.** Cada consulta se comprueba antes de correrla: si no es un
+> `select`, el script para. De las funciones sólo entran las de lectura.
+
+| Resultado | Qué hacer |
+|---|---|
+| **Todo igual** | ✅ Siga al §5 |
+| Alguna difiere | 🛑 **PARE.** Cada diferencia es una consulta que el día del evento devolvería otra cosa — y ninguna daría error |
+
+**Por qué hacen falta los dos:** se pueden haber cargado los datos perfectos y
+aun así una consulta devolver de más o de menos, porque un filtro se tradujo
+mal o un embebido volvió como lista en vez de objeto. El primero mira la
+carga; éste mira el adaptador.
+
 ---
 ## 5 · Las cuentas
 
