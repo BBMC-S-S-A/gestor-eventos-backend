@@ -48,6 +48,7 @@ SET FOREIGN_KEY_CHECKS = 0;
 DROP PROCEDURE IF EXISTS gestek_add_col;
 DROP PROCEDURE IF EXISTS gestek_drop_col;
 DROP PROCEDURE IF EXISTS gestek_add_idx;
+DROP PROCEDURE IF EXISTS gestek_add_fk;
 DELIMITER //
 
 CREATE PROCEDURE gestek_add_col(IN p_tabla VARCHAR(64), IN p_col VARCHAR(64), IN p_def TEXT)
@@ -73,6 +74,16 @@ BEGIN
   IF NOT EXISTS (SELECT 1 FROM information_schema.statistics
                   WHERE table_schema = DATABASE() AND table_name = p_tabla AND index_name = p_idx) THEN
     SET @s = CONCAT('CREATE INDEX `', p_idx, '` ON `', p_tabla, '` (', p_cols, ')');
+    PREPARE st FROM @s; EXECUTE st; DEALLOCATE PREPARE st;
+  END IF;
+END //
+
+CREATE PROCEDURE gestek_add_fk(IN p_tabla VARCHAR(64), IN p_fk VARCHAR(64), IN p_def TEXT)
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM information_schema.table_constraints
+                  WHERE table_schema = DATABASE() AND table_name = p_tabla
+                    AND constraint_name = p_fk AND constraint_type = 'FOREIGN KEY') THEN
+    SET @s = CONCAT('ALTER TABLE `', p_tabla, '` ADD CONSTRAINT `', p_fk, '` FOREIGN KEY ', p_def);
     PREPARE st FROM @s; EXECUTE st; DEALLOCATE PREPARE st;
   END IF;
 END //
@@ -191,41 +202,44 @@ CALL gestek_drop_col('perfil_talento', 'telefono');
  * `ON DELETE SET NULL` en las de promoción: borrar una promoción vieja no
  * puede llevarse por delante la boleta que se vendió con ella.
  */
-ALTER TABLE `zonas`
-  ADD CONSTRAINT `zonas_evento_id_fkey`
-  FOREIGN KEY (`evento_id`) REFERENCES `eventos` (`id`) ON DELETE CASCADE;
+CALL gestek_add_fk('zonas', 'zonas_evento_id_fkey',
+                   '(`evento_id`) REFERENCES `eventos` (`id`) ON DELETE CASCADE');
 
-ALTER TABLE `agenda_sessions`
-  ADD CONSTRAINT `agenda_sessions_zona_id_fkey`
-  FOREIGN KEY (`zona_id`) REFERENCES `zonas` (`id`) ON DELETE SET NULL;
+CALL gestek_add_fk('agenda_sessions', 'agenda_sessions_zona_id_fkey',
+                   '(`zona_id`) REFERENCES `zonas` (`id`) ON DELETE SET NULL');
 
-ALTER TABLE `networking_expositores`
-  ADD CONSTRAINT `networking_expositores_zona_id_fkey`
-  FOREIGN KEY (`zona_id`) REFERENCES `zonas` (`id`) ON DELETE SET NULL;
+CALL gestek_add_fk('networking_expositores', 'networking_expositores_zona_id_fkey',
+                   '(`zona_id`) REFERENCES `zonas` (`id`) ON DELETE SET NULL');
 
-ALTER TABLE `ticket_types`
-  ADD CONSTRAINT `ticket_types_crea_torneo_id_fkey`
-  FOREIGN KEY (`crea_torneo_id`) REFERENCES `torneos` (`id`) ON DELETE SET NULL;
+CALL gestek_add_fk('ticket_types', 'ticket_types_crea_torneo_id_fkey',
+                   '(`crea_torneo_id`) REFERENCES `torneos` (`id`) ON DELETE SET NULL');
 
-ALTER TABLE `event_form_fields`
-  ADD CONSTRAINT `event_form_fields_torneo_id_fkey`
-  FOREIGN KEY (`torneo_id`) REFERENCES `torneos` (`id`) ON DELETE CASCADE;
+CALL gestek_add_fk('event_form_fields', 'event_form_fields_torneo_id_fkey',
+                   '(`torneo_id`) REFERENCES `torneos` (`id`) ON DELETE CASCADE');
 
-ALTER TABLE `torneo_equipos`
-  ADD CONSTRAINT `torneo_equipos_ticket_id_fkey`
-  FOREIGN KEY (`ticket_id`) REFERENCES `tickets` (`id`) ON DELETE SET NULL;
+CALL gestek_add_fk('torneo_equipos', 'torneo_equipos_ticket_id_fkey',
+                   '(`ticket_id`) REFERENCES `tickets` (`id`) ON DELETE SET NULL');
 
-ALTER TABLE `tickets`
-  ADD CONSTRAINT `tickets_promocion_id_fkey`
-  FOREIGN KEY (`promocion_id`) REFERENCES `promociones` (`id`) ON DELETE SET NULL;
+CALL gestek_add_fk('tickets', 'tickets_promocion_id_fkey',
+                   '(`promocion_id`) REFERENCES `promociones` (`id`) ON DELETE SET NULL');
 
-ALTER TABLE `payment_transactions`
-  ADD CONSTRAINT `payment_transactions_promocion_id_fkey`
-  FOREIGN KEY (`promocion_id`) REFERENCES `promociones` (`id`) ON DELETE SET NULL;
+CALL gestek_add_fk('payment_transactions', 'payment_transactions_promocion_id_fkey',
+                   '(`promocion_id`) REFERENCES `promociones` (`id`) ON DELETE SET NULL');
 
-/* Si esto se corre por segunda vez, las ocho de arriba fallan con
-   «Duplicate foreign key constraint name». No pasa nada y no hay que arreglar
-   nada: significa que ya estaban. Todo lo demás del archivo sí es idempotente. */
+/* Las ocho de arriba preguntan antes de crear, así que correr este archivo
+   dos veces no falla.
+
+   Antes iban con un `ALTER TABLE` pelado y aquí decía que fallar «no pasa
+   nada, significa que ya estaban». No era inofensivo por dos razones:
+
+     · El cliente de MySQL se para en el PRIMER error, así que el archivo no
+       llegaba a los `DROP TABLE` de más abajo y las cuatro tablas muertas se
+       quedaban puestas.
+     · Desde la regeneración del volcado del 15-sep, `zonas` y sus claves YA
+       vienen en `01_tablas.sql` y `05_claves_foraneas.sql`. O sea que el
+       choque no es sólo al repetir: pasa SIEMPRE, en la carga normal, y según
+       cuál de los dos archivos corriera primero se quedaba sin aplicar el
+       final de uno o del otro. */
 
 /* ═══ 5 · Cuatro tablas que el volcado crea y nunca se usaron ═════════════
  *
@@ -249,6 +263,7 @@ DROP TABLE IF EXISTS `recordatorio_inapp_log`;
 DROP PROCEDURE IF EXISTS gestek_add_col;
 DROP PROCEDURE IF EXISTS gestek_drop_col;
 DROP PROCEDURE IF EXISTS gestek_add_idx;
+DROP PROCEDURE IF EXISTS gestek_add_fk;
 
 SET FOREIGN_KEY_CHECKS = 1;
 
