@@ -137,11 +137,12 @@ test('un método que no existe lanza y dice cuál era', () => {
   lanza(() => pg.from('t').select('*').textSearch('nombre', 'ana'), /\.textSearch\(\)/);
 });
 
-test('escribir lanza, y dice que es el tramo 3', () => {
-  lanza(() => pg.from('t').insert({ a: 1 }), /\.insert\(\)/);
-  lanza(() => pg.from('t').update({ a: 1 }), /\.update\(\)/);
-  lanza(() => pg.from('t').delete(), /\.delete\(\)/);
-});
+/* Aquí había una prueba de que `insert`, `update` y `delete` lanzaban. El
+   tramo 3 las implementó, así que dejó de ser verdad y sus pruebas viven ahora
+   en `postgrest.escrituras.test.js` y `postgrest.contraMysql.test.js`.
+
+   Que una prueba así falle al implementar el tramo siguiente es la señal buena:
+   decía la verdad sobre el estado anterior y avisa de que ha cambiado. */
 
 test('los JOIN embebidos lanzan y mandan al tramo 5', () => {
   /* Son 66, y uno lo usa `lib/acceso.js`, el guardia de las 378 rutas. Si esto
