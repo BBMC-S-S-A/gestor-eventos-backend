@@ -1,6 +1,7 @@
 const express = require('express');
 const { exige, sesion, permisosDeMiembro, SELECT_PERMISOS } = require('../core/permisos');
 const supabase = require('../lib/supabase.js');
+const contadores = require('../lib/contadores.js');
 const sillaDeLaCompra = require('../lib/sillaDeLaCompra.js');
 const { personasDeTicket } = require('../lib/cuantasPersonas.js');
 const { verifySupabaseJWT } = require('../middleware/auth.js');
@@ -562,12 +563,9 @@ router.delete('/:eventoId/clientes/:ticketId', exige(PERMS_BORRAR), async (req, 
  * iba el evento. El suelo en cero lo pone ahora la propia función. */
 async function ajustarAforo(eventoId, ticketTypeId, delta, personas = 1) {
   if (ticketTypeId) {
-    await supabase.rpc('sumar_vendidos_tipo', { p_tipo: ticketTypeId, p_delta: delta });
+    await contadores.sumarVendidosTipo(ticketTypeId, delta);
   }
-  await supabase.rpc('sumar_aforo_vendido', {
-    p_evento: eventoId,
-    p_delta : delta * Math.max(1, personas),
-  });
+  await contadores.sumarAforoVendido(eventoId, delta * Math.max(1, personas));
 }
 
 /* POST /eventos/:eventoId/clientes/importar — import masivo desde CSV.
@@ -1036,9 +1034,9 @@ router.post('/:eventoId/clientes/importar', exige(PERMS_CLIENTES), async (req, r
       /* Un import va en una sola tanda, pero puede coincidir con las ventas de
          la página, que siguen entrando mientras esto corre. Mismo motivo que
          en `ajustarAforo`: se suma en la base. Ver 0138. */
-      await supabase.rpc('sumar_vendidos_tipo', { p_tipo: tipo.id, p_delta: ok.length });
+      await contadores.sumarVendidosTipo(tipo.id, ok.length);
       if (marcar_pagado) {
-        await supabase.rpc('sumar_aforo_vendido', { p_evento: eventoId, p_delta: ok.length });
+        await contadores.sumarAforoVendido(eventoId, ok.length);
       }
 
       const organizadorId = evImp && evImp.owner_id;

@@ -107,6 +107,26 @@ const config = {
      navegador sigue subiendo directo a Supabase como hoy. */
   ARCHIVOS_PROPIOS: process.env.ARCHIVOS_PROPIOS === 'true' || process.env.ARCHIVOS_PROPIOS === '1',
 
+  /* ── Los datos del evento ─────────────────────────────────────────────
+     El tercer interruptor, y el único que NO se puede encender a medias.
+   *
+   * Los otros dos parten el sistema por una costura natural: la identidad vive
+   * en su propia base y los archivos en su propio disco, así que se pueden
+   * mover solos. Los datos del evento no: `tickets`, `eventos`, `ticket_types`
+   * y las otras 68 se leen entre sí en la misma consulta. Encender esto para
+   * una parte y no para otra deja el contador del aforo escribiendo en MySQL
+   * mientras las boletas que cuenta siguen en Supabase — o sea, contando una
+   * base que no es.
+   *
+   * Por eso es UNA bandera para todo el frente, y por eso el día que se
+   * encienda tiene que estar cableado TODO lo que toque esas tablas. Lo que
+   * hay cableado hoy está en `lib/contadores.js`; lo que falta, en
+   * `db/CORTE.md` §10.
+   *
+   * Mientras esté apagada —que es siempre, hasta el corte— no cambia nada:
+   * cada llamada sigue yendo a la RPC de Supabase igual que hasta hoy. */
+  DATOS_PROPIOS: process.env.DATOS_PROPIOS === 'true' || process.env.DATOS_PROPIOS === '1',
+
   /* La raíz va FUERA de la carpeta del código: si estuviera dentro, un
      despliegue que reemplace el directorio se lleva por delante las fotos de
      todos los eventos, y no hay copia. En cPanel algo como
@@ -149,6 +169,18 @@ if (AUTH_PROPIA) {
   if (!config.GOOGLE_CLIENT_ID) {
     console.warn('[WARN]  AUTH_PROPIA sin GOOGLE_CLIENT_ID: «entrar con Google» quedará apagado.');
   }
+}
+
+/* `DATOS_PROPIOS` sin base a la que ir es la forma de que el día del corte se
+   descubra en la primera venta y no en el arranque. Aviso y no error, como los
+   de arriba: el backend tiene que poder arrancar en una máquina de desarrollo
+   donde se encienda la bandera para mirar algo. */
+if (config.DATOS_PROPIOS) {
+  const base = config.MYSQL_DATOS_DATABASE || config.MYSQL_DATABASE;
+  if (!config.MYSQL_HOST || !config.MYSQL_USER || !base) {
+    console.warn('[WARN]  DATOS_PROPIOS encendido pero falta la configuración de MySQL. Ver CONFIGURAR.md.');
+  }
+  console.log(`[datos] los datos del evento se leen y escriben en MySQL (${base || 'sin base'}).`);
 }
 
 module.exports = config;

@@ -7,6 +7,7 @@
 const express = require('express');
 const crypto  = require('crypto');
 const supabase = require('../lib/supabase.js');
+const contadores = require('../lib/contadores.js');
 const sillaDeLaCompra = require('../lib/sillaDeLaCompra.js');
 const { personasDeTicket } = require('../lib/cuantasPersonas.js');
 const { precioDeCompra } = require('../lib/precioTicket.js');
@@ -684,12 +685,12 @@ async function procesarPago(pago) {
     /* Personas, no boletas: una mesa de cuatro entra con una boleta. La suma va
        en la base (0138): dos webhooks a la vez leían el mismo contador. */
     const personas = await personasDeTicket(ticket.id);
-    await supabase.rpc('sumar_aforo_vendido', { p_evento: ticket.evento_id, p_delta: personas });
+    await contadores.sumarAforoVendido(ticket.evento_id, personas);
 
     const { data: tt } = await supabase
       .from('tickets').select('ticket_type_id').eq('id', ticketId).single();
     if (tt?.ticket_type_id) {
-      await supabase.rpc('sumar_vendidos_tipo', { p_tipo: tt.ticket_type_id, p_delta: 1 });
+      await contadores.sumarVendidosTipo(tt.ticket_type_id, 1);
     }
   } else if (status === 'refunded' || status === 'cancelled') {
     const { data: ticketRefund } = await supabase
@@ -707,9 +708,9 @@ async function procesarPago(pago) {
          El suelo en cero lo pone la función (0138), así que ya no hace falta
          leer el contador para comprobar que no se pasa de rosca. */
       const personas = await personasDeTicket(ticketRefund.id);
-      await supabase.rpc('sumar_aforo_vendido', { p_evento: ticketRefund.evento_id, p_delta: -personas });
+      await contadores.sumarAforoVendido(ticketRefund.evento_id, -personas);
       if (ticketRefund.ticket_type_id) {
-        await supabase.rpc('sumar_vendidos_tipo', { p_tipo: ticketRefund.ticket_type_id, p_delta: -1 });
+        await contadores.sumarVendidosTipo(ticketRefund.ticket_type_id, -1);
       }
       await notificarTopWaitlist(ticketRefund.ticket_type_id, ticketRefund.evento_id);
     }

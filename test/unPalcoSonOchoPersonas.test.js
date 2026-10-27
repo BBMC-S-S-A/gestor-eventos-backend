@@ -57,11 +57,13 @@ test('«vendidos» y «aforo_vendido» siguen siendo números distintos', () => 
   const fn = c.slice(c.indexOf('async function ajustarAforo'), c.indexOf('\n}\n', c.indexOf('async function ajustarAforo')));
   /* Desde la 0138 los dos contadores se suman DENTRO de la base, así que lo
      que se comprueba es el delta que se le manda a cada función — que es donde
-     vive la distinción. El suelo en cero lo pone ahora la propia función. */
+     vive la distinción. El suelo en cero lo pone ahora la propia función.
+     Desde el cableado del 27-oct la llamada va por `lib/contadores.js`, que
+     decide el motor; el delta de cada una no cambió, que es lo de aquí. */
   /* `vendidos` se mueve por delta a secas: una mesa vendida es una unidad. */
-  assert.match(fn, /sumar_vendidos_tipo'[^)]*p_delta: delta\b(?! \*)/);
+  assert.match(fn, /sumarVendidosTipo\([^)]*,\s*delta\s*\)/);
   /* El aforo, multiplicado por las personas. */
-  assert.match(fn, /sumar_aforo_vendido'[\s\S]{0,120}p_delta\s*:\s*delta \* Math\.max\(1, personas\)/);
+  assert.match(fn, /sumarAforoVendido\([^)]*,\s*delta \* Math\.max\(1, personas\)\)/);
 });
 
 test('se pregunta la capacidad ANTES de soltar la silla', () => {
