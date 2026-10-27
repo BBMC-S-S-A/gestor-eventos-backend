@@ -58,14 +58,77 @@ function envolver({ titulo, cuerpo, boton, enlace, pie }) {
 </body></html>`;
 }
 
-async function mandar(opciones) {
+/* ── Por qué un correo que no sale es el fallo más caro de este módulo ────
+ *
+ * `servicio.recuperar()` contesta SIEMPRE lo mismo —«si esa cuenta existe, te
+ * llegará un correo»— y eso está bien: contestar distinto delataría qué
+ * direcciones tienen cuenta. Pero significa que, si el SMTP está mal, la
+ * pantalla dice que el correo salió y no salió. Nadie se entera: ni quien lo
+ * pidió, ni quien administra.
+ *
+ * Y el día del corte eso no es una molestia. Son las **14 personas que entran
+ * con contraseña** (medido contra producción el 27-oct): si olvidan la suya y
+ * el correo no sale, no tienen ninguna otra forma de entrar.
+ *
+ * Así que la respuesta al usuario NO cambia —la propiedad de seguridad se
+ * mantiene— y lo que cambia es que el fallo deje de ser mudo HACIA DENTRO:
+ *
+ *   · una línea con una marca buscable (`[auth][CORREO-NO-SALIO]`), con qué
+ *     correo era y a quién iba;
+ *   · una cuenta de fallos que `/health` y el arranque pueden mirar.
+ *
+ * Lo que NO se hace: reintentar aquí. Hay una cola (`lib/colaCorreo.js`) para
+ * eso, y un reintento a ciegas dentro de la petición la alarga sin arreglar
+ * nada cuando lo que falla es la configuración — que es el caso que importa.
+ */
+const fallos = { total: 0, ultimo: null };
+
+async function mandar(opciones, que = 'correo') {
   try {
     await email.sendMail(opciones);
     return true;
   } catch (e) {
-    console.error('[auth] no se pudo mandar el correo:', e?.message || e);
+    fallos.total += 1;
+    fallos.ultimo = { que, cuando: new Date().toISOString(), motivo: e?.message || String(e) };
+    /* La marca entre corchetes es para poder buscarla en el registro del
+       cPanel sin leerlo entero. El destinatario va porque sin él no se puede
+       avisar a la persona por otro medio, que es lo único que queda cuando
+       esto falla. */
+    console.error(`[auth][CORREO-NO-SALIO] ${que} → ${opciones?.to}: ${e?.message || e}`);
     return false;
   }
+}
+
+/* Cuántos correos no salieron desde que arrancó. Lo mira `/health` y lo mira
+   quien esté de guardia el día del corte: si este número sube, hay gente
+   esperando un enlace que no va a llegar. */
+function fallosDeCorreo() {
+  return { ...fallos };
+}
+
+/* ── La comprobación del arranque ────────────────────────────────────────
+ *
+ * El módulo de archivos comprueba que su almacén se pueda escribir AL
+ * ARRANCAR, y no cuando el primer usuario sube una foto. Esto es lo mismo
+ * para el correo, y faltaba.
+ *
+ * Un SMTP mal configurado se veía sólo cuando alguien pedía recuperar su
+ * contraseña — o sea, cuando ya había alguien fuera esperando. Ahora se ve en
+ * el log del arranque, que es donde se mira después de encender una bandera.
+ *
+ * No lanza ni tumba el proceso: el resto de la aplicación funciona sin correo,
+ * y caerse al arrancar por esto dejaría a todo el mundo fuera para proteger a
+ * catorce. Avisa, fuerte, y sigue.
+ */
+async function comprobar() {
+  const r = await email.verificarConexion();
+  if (r.ok) return r;
+  console.error(
+    `[auth][CORREO] NO se puede mandar correo: ${r.mensaje}\n` +
+    `  ${r.sugerencia || ''}\n` +
+    '  Mientras esto no funcione, quien olvide su contraseña NO puede recuperarla.'
+  );
+  return r;
 }
 
 async function confirmacion(usuario, token) {
@@ -86,7 +149,7 @@ async function confirmacion(usuario, token) {
       enlace,
       pie   : 'Si no fuiste vos quien creó esta cuenta, ignorá este mensaje: sin confirmar, la cuenta no sirve para nada.',
     }),
-  });
+  }, 'confirmación');
 }
 
 async function recuperacion(usuario, token) {
@@ -104,7 +167,7 @@ async function recuperacion(usuario, token) {
       enlace,
       pie   : 'Si no lo pediste, no hace falta que hagas nada: tu contraseña actual sigue funcionando y este enlace caduca solo.',
     }),
-  });
+  }, 'recuperación');
 }
 
 /* El tercero. Se manda a la dirección real cuando alguien intenta registrarse
@@ -125,4 +188,8 @@ async function avisarIntentoDeRegistro(usuario) {
   });
 }
 
-module.exports = { confirmacion, recuperacion, avisarIntentoDeRegistro, _envolver: envolver };
+module.exports = {
+  confirmacion, recuperacion, avisarIntentoDeRegistro,
+  comprobar, fallosDeCorreo,
+  _envolver: envolver, _mandar: mandar,
+};

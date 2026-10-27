@@ -72,4 +72,9 @@ module.exports = {
   sesionOpcional,
   verificar: usuarioDeLaPeticion,
   servicio,
+  /* El correo sale por la puerta del módulo, como el almacén en
+     `modules/archivos`: quien arranca la aplicación tiene que poder
+     comprobarlo sin conocer el camino de dentro. */
+  comprobarCorreo: () => require('./correos').comprobar(),
+  fallosDeCorreo : () => require('./correos').fallosDeCorreo(),
 };
