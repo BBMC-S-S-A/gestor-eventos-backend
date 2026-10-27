@@ -161,8 +161,8 @@ Cada tramo deja algo que se puede probar solo, y ninguno cambia nada mientras
 | 2 | El resto de filtros: `in`, `is`, `neq`, `not`, `gt/gte/lt/lte`, `ilike` (`match`: cero usos) | Idem, caso por caso | ✅ |
 | 3 | Escrituras: `insert`, `update`, `delete`, `upsert` — y el `JSON.stringify` de las 8 columnas de array | Idem | ✅ |
 | 4 | `count` y `range`, con la semántica escrita | Comparando contra Postgres | ✅ |
-| 5 | **Los 66 JOIN embebidos** | Empezando por el de `lib/acceso.js`, con la prueba de permisos en verde | ✅ 64/66 |
-| 5b | `!inner` y filtrar por columna embebida | Los 2 que faltan | ⬜ |
+| 5 | **Los 66 JOIN embebidos** | Empezando por el de `lib/acceso.js`, con la prueba de permisos en verde | ✅ |
+| 5b | `!inner` y filtrar por columna embebida | Los 2 que faltaban | ✅ |
 | 6 | `.or()` y su gramática | Las cinco formas que hay hoy | ⬜ |
 | 7 | Las 12 `.rpc()` que faltan | Una por una | ⬜ |
 | 8 | La comparación final: las mismas consultas contra los dos motores | `scripts/comparar-bases.js` ampliado | ⬜ |
@@ -435,6 +435,51 @@ datos de otra persona: el revisor donde se pedía el autor.
 
 Los dos son exactamente el fallo que este adaptador existe para evitar: sin
 error, con la respuesta a medias.
+
+---
+
+## 10 · Tramo 5b — `!inner` y filtrar por columna embebida
+
+Los 2 que faltaban. Son pocos, pero son el **único** sitio del adaptador donde
+hace falta un JOIN de verdad.
+
+### Por qué aquí sí es un JOIN
+
+`!inner` **descarta filas del padre**, y eso tiene que pasar **antes** del
+`LIMIT` y del `count`. Con la consulta aparte del tramo 5 no se puede: la
+página ya estaría cortada cuando se descubriera que a una fila le falta el
+hijo.
+
+El JOIN está ahí **sólo para filtrar**: las columnas del embebido se siguen
+trayendo con su propia consulta. Mezclar las dos cosas es lo que multiplica
+filas, y para un `!inner` hacia muchos-a-uno no hace falta.
+
+### El conteo lleva el mismo JOIN
+
+Si no, la página vendría recortada pero el total seguiría siendo el de la tabla
+entera: **«1 de 2» cuando de verdad hay 1.** Un número creíble y equivocado,
+que es el peor de todos.
+
+> Esto lo cazó una prueba, no la lectura del código: el conteo se calculaba
+> **antes** de resolver los embebidos, así que nunca veía el JOIN.
+
+### Con JOIN se cualifica todo
+
+`event_members` y `event_roles` tienen las dos un `id`. Sin cualificar, MySQL
+daría `ER_NON_UNIQ_ERROR` —ruidoso, se arregla—; pero con una columna que sólo
+existiera en una de las dos **la resolvería callando**, filtrando por la tabla
+equivocada.
+
+Y el `*` del padre pasa a ser `tabla.*`: un `SELECT *` con JOIN traería las dos
+tablas pegadas y las columnas que se llamen igual se machacarían — el `id`
+sería el del rol.
+
+### Lo que lanza a propósito
+
+| | Por qué |
+|---|---|
+| filtrar por una columna embebida **sin** `!inner` | PostgREST también lo exige: sin el `!inner` no hay nada que filtrar. |
+| `!inner` hacia **uno-a-muchos** | Multiplicaría las filas del padre —tres hijos, tres copias— y el `LIMIT` dejaría de contar filas del padre. PostgREST lo resuelve con un lateral; aquí haría falta un `EXISTS`, que es otra cosa y nadie la ha pedido. Los dos `!inner` del código son muchos-a-uno. |
 
 ### Lo que NO está cableado todavía
 

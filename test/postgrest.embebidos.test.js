@@ -270,18 +270,102 @@ test('embebidos contra MySQL de verdad', { skip: SALTAR && 'pon MYSQL_PRUEBAS=1'
       (e) => e.code === 'PGRST_NO_SOPORTADO' && /no hay clave ajena/.test(e.message));
   });
 
-  await t.test('!inner LANZA y manda al tramo 5b', async () => {
-    /* Descarta filas del padre, y eso tiene que pasar ANTES del LIMIT y del
-       count o la página sale corta y el total miente. Son 2 usos de 66. */
-    await assert.rejects(
-      async () => { await db.from('event_members').select('id, rol:event_roles!rol_id!inner(nombre)'); },
-      (e) => e.code === 'PGRST_NO_SOPORTADO' && /5b/.test(e.message));
+  /* ── Tramo 5b: !inner y filtrar por columna embebida ───────────────── */
+
+  await t.test('!inner descarta las filas del padre que no tienen hijo', async () => {
+    /* `m-2` no tiene rol. Con el embebido normal salen los dos; con `!inner`
+       sale uno. */
+    const normal = await db.from('event_members')
+      .select('id, rol:event_roles!rol_id(nombre)').eq('evento_id', 'ev-1');
+    assert.equal(normal.data.length, 2);
+
+    const unido = await db.from('event_members')
+      .select('id, rol:event_roles!rol_id!inner(nombre)').eq('evento_id', 'ev-1');
+    assert.equal(unido.error, null);
+    assert.deepEqual(unido.data.map(f => f.id), ['m-1']);
+    assert.equal(unido.data[0].rol.nombre, 'Portero');
   });
 
-  await t.test('filtrar por una columna embebida LANZA y manda al tramo 5b', async () => {
+  await t.test('EL CONTEO también ve el !inner', async () => {
+    /* Si el JOIN se quedara fuera del conteo, la página vendría recortada pero
+       el total seguiría siendo el de la tabla entera: «1 de 2» cuando de
+       verdad hay 1. Un número creíble y equivocado, que es el peor. */
+    const { data, count } = await db.from('event_members')
+      .select('id, rol:event_roles!rol_id!inner(nombre)', { count: 'exact' })
+      .eq('evento_id', 'ev-1');
+    assert.equal(data.length, 1);
+    assert.equal(count, 1, 'el conteo ignoró el !inner y devolvió el total sin filtrar');
+  });
+
+  await t.test('filtrar por una columna de la tabla embebida', async () => {
+    /* El caso de `routes/clientes.js`: `.gt('tipo.precio', 0)`. */
+    const caja = await db.from('event_members')
+      .select('id, rol:event_roles!rol_id!inner(nombre)').eq('rol.nombre', 'Caja');
+    assert.equal(caja.error, null);
+    assert.deepEqual(caja.data, [], 'nadie tiene el rol Caja');
+
+    const portero = await db.from('event_members')
+      .select('id, rol:event_roles!rol_id!inner(nombre)').eq('rol.nombre', 'Portero');
+    assert.deepEqual(portero.data.map(f => f.id), ['m-1']);
+  });
+
+  await t.test('sin !inner, filtrar por columna embebida sigue LANZANDO', async () => {
+    /* PostgREST también lo exige: sin el `!inner` no hay nada que filtrar. */
     await assert.rejects(
       async () => { await db.from('event_members').select('id, rol:event_roles!rol_id(nombre)').eq('rol.nombre', 'Caja'); },
-      (e) => e.code === 'PGRST_NO_SOPORTADO' && /5b/.test(e.message));
+      (e) => e.code === 'PGRST_NO_SOPORTADO' && /!inner/.test(e.message));
+  });
+
+  await t.test('con JOIN, una columna que existe en las DOS tablas no se confunde', async () => {
+    /* `event_members` y `event_roles` tienen las dos un `id`. Sin cualificar,
+       MySQL diría `ER_NON_UNIQ_ERROR` —ruidoso, se arregla—; pero con una
+       columna que sólo existiera en una de las dos la resolvería CALLANDO,
+       filtrando por la tabla equivocada. Por eso se cualifica todo. */
+    const { data, error } = await db.from('event_members')
+      .select('id, rol:event_roles!rol_id!inner(id, nombre)')
+      .eq('id', 'm-1').maybeSingle();
+    assert.equal(error, null, `se confundió de tabla: ${error?.message}`);
+    assert.equal(data.id, 'm-1', 'devolvió el id del ROL en vez del miembro');
+    assert.equal(data.rol.id, 'rol-1');
+  });
+
+  await t.test('el * del padre con JOIN no se trae las columnas del hijo', async () => {
+    /* `SELECT *` con JOIN traería las dos tablas pegadas, y las columnas que se
+       llamen igual se machacarían: `id` sería el del rol. PostgREST devuelve
+       sólo las del padre y el embebido aparte. */
+    const { data } = await db.from('event_members')
+      .select('*, rol:event_roles!rol_id!inner(nombre)').eq('id', 'm-1').maybeSingle();
+    assert.equal(data.id, 'm-1');
+    assert.equal(data.user_id, 'u-1');
+    assert.ok(!('permissions' in data), 'se colaron columnas del rol en el padre');
+    assert.equal(data.rol.nombre, 'Portero');
+  });
+
+  await t.test('la forma de routes/clientes.js: dos embebidos, uno inner, con conteo y rango', async () => {
+    /* La consulta más difícil del repo, en pequeño: un embebido normal que NO
+       debe descartar filas, otro con `!inner` que sí, un filtro sobre la tabla
+       embebida, conteo exacto y rango. */
+    const { data, count, error } = await db.from('event_members')
+      .select('id, user_id, notas(texto), rol:event_roles!rol_id!inner(nombre)', { count: 'exact' })
+      .eq('evento_id', 'ev-1').gt('rol.nombre', 'A')
+      .order('id').range(0, 9);
+
+    assert.equal(error, null);
+    assert.equal(count, 1);
+    assert.equal(data.length, 1);
+    assert.equal(data[0].id, 'm-1');
+    assert.equal(data[0].rol.nombre, 'Portero');
+    assert.deepEqual(data[0].notas.map(n => n.texto).sort(), ['primera', 'segunda']);
+  });
+
+  await t.test('un !inner hacia uno-a-muchos LANZA', async () => {
+    /* Multiplicaría las filas del padre —tres notas, tres copias del miembro—
+       y entonces el LIMIT dejaría de contar filas del padre y el conteo
+       mentiría. PostgREST lo resuelve con un lateral; aquí haría falta un
+       EXISTS, que es otra cosa y nadie la ha pedido. */
+    await assert.rejects(
+      async () => { await db.from('event_members').select('id, notas!inner(texto)'); },
+      (e) => e.code === 'PGRST_NO_SOPORTADO' && /multiplicar/.test(e.message));
   });
 
   await t.test('con DOS caminos a la misma tabla y sin decir cuál, LANZA', async () => {
