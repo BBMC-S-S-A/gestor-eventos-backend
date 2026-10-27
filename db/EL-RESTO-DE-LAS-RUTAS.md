@@ -44,11 +44,16 @@ se llaman igual:
 | `.range()` | 18 | | |
 | `.gte()` `.gt()` `.lt()` `.lte()` | 25 | | |
 | `.neq()` | 31 | | |
-| `.match()` | 6 | | |
+| `.match()` | **0** | | |
 
 > **`.filter(col, op, val)` de supabase: CERO.** Un recuento ingenuo da 200,
 > pero las 157 son `Array.prototype.filter`. Se dice porque es justo el tipo
 > de número que hace parecer imposible algo que no lo es.
+>
+> **Y `.match()` también es CERO**, por lo mismo: los 6 que decía esta tabla
+> eran `String.prototype.match(/regex/)`. Corregido al escribir el tramo 2. El
+> recuento ingenuo falla dos veces en la misma tabla, así que conviene
+> desconfiar del tercero.
 
 ### Las dos cosas que no son mecánicas
 
@@ -152,7 +157,7 @@ Cada tramo deja algo que se puede probar solo, y ninguno cambia nada mientras
 | # | Qué | Cómo se comprueba | |
 |---|---|---|---|
 | 1 | El esqueleto: `from`, `select` de columnas, `eq`, `order`, `limit`, `single`/`maybeSingle`, y el **reventar** ante lo no soportado | Contra MySQL real, tabla por tabla | ✅ |
-| 2 | El resto de filtros: `in`, `is`, `neq`, `not`, `gt/gte/lt/lte`, `ilike`, `match` | Idem, caso por caso | ⬜ |
+| 2 | El resto de filtros: `in`, `is`, `neq`, `not`, `gt/gte/lt/lte`, `ilike` (`match`: cero usos) | Idem, caso por caso | ✅ |
 | 3 | Escrituras: `insert`, `update`, `delete`, `upsert` — y el `JSON.stringify` de las 8 columnas de array | Idem | ⬜ |
 | 4 | `count` y `range`, con la semántica escrita | Comparando contra Postgres | ⬜ |
 | 5 | **Los 66 JOIN embebidos** | Empezando por el de `lib/acceso.js`, con la prueba de permisos en verde | ⬜ |
@@ -170,10 +175,20 @@ Cada tramo deja algo que se puede probar solo, y ninguno cambia nada mientras
 2. **¿Qué se hace con `generar_recordatorios_inapp`?** Está rota desde hace
    tiempo —lee una tabla que ya no existe— y lo que corresponde es borrarla.
    El `drop` está escrito en el comentario de la `0139`.
-3. **El cotejo.** `utf8mb4_0900_as_ci` es acento-SENSIBLE: «Bogota» no casa
-   con «Bogotá», y en Postgres con `ilike` tampoco. Parece que coinciden, pero
-   conviene comprobarlo con datos reales antes de dar por buena la búsqueda
-   del mostrador. Entra en el tramo 2, con `ilike`.
+3. ~~**El cotejo.**~~ **MEDIDO el 27 de octubre de 2026, y coincide.** Las 91
+   tablas de datos están en `utf8mb4_0900_as_ci` —insensible a mayúsculas,
+   SENSIBLE a acentos—, que es exactamente lo que hace `ILIKE` en Postgres:
+
+   | buscando | Postgres `ILIKE` | MySQL `0900_as_ci` | MySQL `unicode_ci` |
+   |---|---|---|---|
+   | `%bogotá%` | Bogotá, BOGOTÁ | Bogotá, BOGOTÁ ✅ | los tres ❌ |
+   | `%bogota%` | Bogota | Bogota ✅ | los tres ❌ |
+
+   Por eso `ilike` se traduce a un `LIKE` pelado. El otro cotejo —el de
+   `001_identidad` y `002_archivos`— es acento-ciego y devolvería de más, pero
+   esas tablas no se consultan por este camino. Lo vigila
+   `test/postgrest.filtros.test.js`, porque si una tabla de datos entrara con
+   `_ai_ci` las búsquedas empezarían a devolver de más sin error.
 
 ---
 
@@ -221,6 +236,40 @@ propio `limit`, manda el suyo.
 La parte de integración está tras bandera porque el CI no tiene MySQL, y una
 prueba que falla todos los días acaba borrada. Levanta su propia base, la llena
 y la borra; no toca ninguna del proyecto.
+
+---
+
+## 6 · Tramo 2 — los filtros
+
+`eq` ya estaba; entran `neq`, `gt`, `gte`, `lt`, `lte`, `is`, `in`, `not` e
+`ilike`. Medido sobre el código: **1.330 `eq`, 65 `is`, 31 `neq`, 29 `ilike`,
+25 de rango, 22 `not`, 18 `in`**. De los 22 `not` sólo hay dos formas
+(`not(col,'is',null)` ×18, `not(col,'in',[…])` ×4) y los 65 `is` son todos
+`is(col, null)`.
+
+### La trampa: `.in(col, [])`
+
+Los 18 usos pasan listas que salen de un `.map()`, o sea que **pueden venir
+vacías**. Y los dos motores no se parecen en nada ahí:
+
+| | |
+|---|---|
+| PostgREST | `col = ANY('{}')` → **0 filas**, sin error (medido contra Postgres 17.6 de producción) |
+| MySQL | `col IN ()` es un **error de sintaxis** |
+
+Se traduce a `1 = 0`, que es lo fiel. Dejar que reventara sería ruidoso, sí,
+pero rompería código que hoy funciona: la regla de reventar es para lo que **no
+sabemos** hacer, no para lo que sabemos hacer y da pereza.
+
+### Lo que lanza a propósito
+
+| | Por qué |
+|---|---|
+| `neq/gt/gte/lt/lte` con `null` | No casa con nada en ninguno de los dos motores. Correcto e inútil: quien lo escribe quería `is`. Cero usos. |
+| `is` con algo que no sea `null`/`true`/`false` | Convertirlo en `= ?` parecería funcionar y devolvería otra cosa. |
+| `like` | En Postgres distingue mayúsculas; en MySQL con cotejo `_ci` **no**. Se comportaría como `ilike` y devolvería de más, en silencio. Cero usos. |
+| `match` | Cero usos medidos. No se escribe lo que nadie usa. |
+| un `not` dentro de otro `not` | PostgREST no lo permite y no hay ninguno. |
 
 ### Lo que NO está cableado todavía
 

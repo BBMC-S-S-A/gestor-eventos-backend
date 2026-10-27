@@ -76,14 +76,22 @@ async function abrir() {
       nombre    VARCHAR(120) NOT NULL,
       owner_id  VARCHAR(36),
       fecha     DATE NULL,
+      aforo     INT NULL,
       borrado_at DATETIME NULL
-    );
-    INSERT INTO eventos VALUES
-      ('a', 'Primero', 'juan', '2026-01-01', NULL),
-      ('b', 'Sin fecha', 'juan', NULL,        NULL),
-      ('c', 'Tercero', 'juan', '2026-03-01', NULL),
-      ('d', 'Borrado', 'ana',  '2026-02-01', '2026-02-02 10:00:00');
+    ) COLLATE=utf8mb4_0900_as_ci;
   `);
+    /* El cotejo de la tabla es el de las 91 tablas de datos, no el de la base:
+       es el de la COLUMNA el que manda en una comparación, así que probar con
+       otro mediría algo que no es lo que va a correr en producción. */
+    for (const fila of [
+      ['a', 'Primero',  'juan', '2026-01-01', 100,  null],
+      ['b', 'Sin fecha','juan', null,         null, null],
+      ['c', 'Tercero',  'juan', '2026-03-01', 50,   null],
+      ['d', 'Borrado',  'ana',  '2026-02-01', 10,   '2026-02-02 10:00:00'],
+      ['e', 'Bogota',   'ana',  '2026-04-01', 5,    null],
+      ['f', 'Bogotá',   'ana',  '2026-05-01', 7,    null],
+      ['g', 'BOGOTÁ',   'ana',  '2026-06-01', 9,    null],
+    ]) await conexion.execute('INSERT INTO eventos VALUES (?,?,?,?,?,?)', fila);
 
   /* El adaptador habla con `core/db`, así que se le pasa una base que cumple el
      mismo contrato (`consultar`) apuntando a la de pruebas. Es el seam: así no
@@ -110,7 +118,7 @@ test('adaptador contra MySQL de verdad', { skip: SALTAR && 'pon MYSQL_PRUEBAS=1'
 
   await t.test('eq con null trae las no borradas, no cero filas', async () => {
     const { data } = await pg.from('eventos').select('id').eq('borrado_at', null);
-    assert.deepEqual(data.map(f => f.id).sort(), ['a', 'b', 'c']);
+    assert.deepEqual(data.map(f => f.id).sort(), ['a', 'b', 'c', 'e', 'f', 'g']);
   });
 
   await t.test('ASC pone los NULL al final, como Postgres', async () => {
@@ -181,9 +189,84 @@ test('adaptador contra MySQL de verdad', { skip: SALTAR && 'pon MYSQL_PRUEBAS=1'
     assert.match(error.message, /tabla_que_no_existe/);
   });
 
+  /* ── Tramo 2: el resto de filtros ──────────────────────────────────── */
+
+  await t.test('in con valores, y la lista VACÍA sin reventar', async () => {
+    /* `IN ()` es un error de sintaxis en MySQL, así que esto comprueba que el
+       `1 = 0` sale de verdad y que MySQL lo traga. Es la diferencia entre
+       «cero filas» y «la petición revienta» para los 18 usos que pasan una
+       lista salida de un `.map()`. */
+    const conValores = await pg.from('eventos').select('id').in('id', ['a', 'c']);
+    assert.deepEqual(conValores.data.map(f => f.id).sort(), ['a', 'c']);
+
+    const vacia = await pg.from('eventos').select('id').in('id', []);
+    assert.equal(vacia.error, null, 'la lista vacía reventó en vez de dar cero filas');
+    assert.deepEqual(vacia.data, []);
+  });
+
+  await t.test('not in con lista vacía deja pasar todas', async () => {
+    const { data, error } = await pg.from('eventos').select('id').not('id', 'in', []);
+    assert.equal(error, null);
+    assert.equal(data.length, 7);
+  });
+
+  await t.test('is null y not is null se reparten las filas', async () => {
+    const sinFecha = await pg.from('eventos').select('id').is('fecha', null);
+    assert.deepEqual(sinFecha.data.map(f => f.id), ['b']);
+
+    const conFecha = await pg.from('eventos').select('id').not('fecha', 'is', null);
+    assert.equal(conFecha.data.length, 6);
+  });
+
+  await t.test('neq excluye también las filas con NULL, como Postgres', async () => {
+    /* `col <> 'x'` con `col` a NULL da NULL, que no es verdadero: la fila no
+       entra. Pasa igual en los dos motores, pero sorprende lo bastante como
+       para dejarlo escrito: de 7 filas, una tiene el aforo a NULL y no sale
+       ni en `= 100` ni en `<> 100`. */
+    const { data } = await pg.from('eventos').select('id').neq('aforo', 100);
+    assert.ok(!data.some(f => f.id === 'b'), 'la fila con aforo NULL no debe salir en un <>');
+    assert.ok(!data.some(f => f.id === 'a'), 'la fila con aforo 100 tampoco');
+    assert.equal(data.length, 5);
+  });
+
+  await t.test('los rangos', async () => {
+    const { data } = await pg.from('eventos').select('id').gte('aforo', 9).lte('aforo', 100).order('aforo');
+    assert.deepEqual(data.map(f => f.id), ['g', 'd', 'c', 'a']);
+    /* El aforo de 'b' es NULL y no entra en ningún rango, ni por arriba ni por
+       abajo. Pasa igual en los dos motores. */
+    assert.ok(!data.some(f => f.id === 'b'));
+  });
+
+  await t.test('ilike casa como ILIKE de Postgres: ciego a mayúsculas, NO a acentos', async () => {
+    /* La medida que justifica que `ilike` sea un `LIKE` pelado. Contra el
+       Postgres 17.6 de producción, con estas mismas tres filas:
+       '%bogotá%' → Bogotá, BOGOTÁ ;  '%bogota%' → Bogota. */
+    const conTilde = await pg.from('eventos').select('nombre').ilike('nombre', '%bogotá%');
+    assert.deepEqual(conTilde.data.map(f => f.nombre).sort(), ['BOGOTÁ', 'Bogotá'],
+      'con el cotejo bueno, la tilde distingue pero la mayúscula no');
+
+    const sinTilde = await pg.from('eventos').select('nombre').ilike('nombre', '%bogota%');
+    assert.deepEqual(sinTilde.data.map(f => f.nombre), ['Bogota'],
+      'si salieran las tres, el cotejo sería ciego a los acentos y la búsqueda devolvería de más');
+  });
+
+  await t.test('los comodines de ilike pasan tal cual', async () => {
+    /* `%` y `_` son comodines en los dos motores, así que no se escapan. Un
+       `_` casa un carácter cualquiera: «Bogota» y «Bogotá» pero no «BOGOTÁ»
+       —esa sí, que el cotejo ignora mayúsculas—. */
+    const { data } = await pg.from('eventos').select('nombre').ilike('nombre', 'Bogot_');
+    assert.equal(data.length, 3);
+  });
+
+  await t.test('varios filtros se combinan de verdad contra la base', async () => {
+    const { data } = await pg.from('eventos').select('id')
+      .eq('owner_id', 'ana').is('borrado_at', null).gte('aforo', 7).order('id');
+    assert.deepEqual(data.map(f => f.id), ['f', 'g']);
+  });
+
   await t.test('un método no soportado LANZA aunque haya base detrás', async () => {
     await assert.rejects(
-      async () => { await pg.from('eventos').select('*').ilike('nombre', '%pri%'); },
+      async () => { await pg.from('eventos').select('*').or('a.eq.1,b.eq.2'); },
       (e) => e.code === 'PGRST_NO_SOPORTADO');
   });
 });

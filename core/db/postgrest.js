@@ -135,6 +135,125 @@ function unOrden({ col, ascending, nullsFirst }) {
   return `(${c} IS NULL) ${primero}, ${c} ${dir}`;
 }
 
+/* ── Los filtros ─────────────────────────────────────────────────────────
+ *
+ * Medido sobre el código del 27 de octubre de 2026, que es lo que decide qué
+ * hace falta de verdad:
+ *
+ *     eq 1.330 · neq 31 · is 65 · in 18 · ilike 29 · not 22
+ *     gte 12 · gt 5 · lt 5 · lte 3 · match 0 · like 0 · textSearch 0
+ *
+ * De los 22 `not` sólo hay DOS formas —`not(col,'is',null)` ×18 y
+ * `not(col,'in',[…])` ×4— y los 65 `is` son todos `is(col, null)`. No hay
+ * ningún `neq(col, null)`.
+ *
+ * (`match` salía 6 en el documento del plan y son CERO: eran
+ * `String.prototype.match(/regex/)`. El mismo recuento ingenuo que daba 200
+ * `.filter` de supabase cuando son 0. Queda corregido en el documento.)
+ */
+
+const COMPARADORES = { neq: '<>', gt: '>', gte: '>=', lt: '<', lte: '<=' };
+
+/* `.in(col, [])` — la trampa de este tramo.
+ *
+ * Los 18 usos pasan listas que salen de un `.map()`, o sea que **pueden venir
+ * vacías**, y los dos motores no se parecen en nada ahí:
+ *
+ *   · PostgREST lo traduce a `col = ANY('{}')`, que es válido y no casa con
+ *     ninguna fila. Medido contra el Postgres 17.6 de producción: 0 filas.
+ *   · `col IN ()` en MySQL es un ERROR DE SINTAXIS.
+ *
+ * Así que se escribe `1 = 0`, que es la traducción fiel: cero filas, sin
+ * error. Dejar que reventara sería «ruidoso», sí, pero rompería código que
+ * hoy funciona — y la regla de reventar es para lo que NO sabemos hacer, no
+ * para lo que sabemos hacer y da pereza.
+ */
+function enLista(c, valores, params, de) {
+  if (!Array.isArray(valores)) noSoportado(`\`${de}\` con algo que no es una lista`);
+  if (valores.length === 0) return '1 = 0';
+  for (const v of valores) params.push(v);
+  return `${c} IN (${valores.map(() => '?').join(', ')})`;
+}
+
+/* `.is(col, …)` — PostgREST sólo admite `null`, `true` y `false`.
+   Los 65 usos de hoy son todos `null`; los booleanos se escriben igual en los
+   dos motores, así que entran sin coste. Cualquier otra cosa lanza en vez de
+   convertirse en un `= ?` que parecería funcionar. */
+function esIs(c, valor) {
+  if (valor === null) return `${c} IS NULL`;
+  if (valor === true) return `${c} IS TRUE`;
+  if (valor === false) return `${c} IS FALSE`;
+  noSoportado(`\`is(col, ${JSON.stringify(valor)})\`: PostgREST sólo admite null, true o false`);
+}
+
+/* Una condición. `profundidad` existe sólo para que un `not` no pueda anidar
+   otro `not`: PostgREST no lo permite y no hay ninguno, así que es una puerta
+   cerrada a propósito. */
+function condicion(f, params, profundidad = 0) {
+  const c = ident(f.col, `un \`${f.tipo}\``);
+
+  switch (f.tipo) {
+    case 'eq':
+      /* `eq` con null: PostgREST lo traduce a `IS NULL`, y en SQL `= NULL`
+         nunca casa con nada. Sin esto, `.eq('borrado_at', null)` devolvería
+         cero filas en silencio en vez de las no borradas. */
+      if (f.valor === null) return `${c} IS NULL`;
+      params.push(f.valor);
+      return `${c} = ?`;
+
+    case 'neq': case 'gt': case 'gte': case 'lt': case 'lte':
+      /* Con null, `<>` y los de orden no casan con nada en ninguno de los dos
+         motores, pero es un resultado tan poco intuitivo que si alguien lo
+         escribe es que quería `is`. Cero usos hoy: se cierra la puerta. */
+      if (f.valor === null) noSoportado(`\`${f.tipo}(col, null)\` (¿querías \`is\` o \`not(col,'is',null)\`?)`);
+      params.push(f.valor);
+      return `${c} ${COMPARADORES[f.tipo]} ?`;
+
+    case 'is':
+      return esIs(c, f.valor);
+
+    case 'in':
+      return enLista(c, f.valor, params, 'in');
+
+    /* ── `ilike`: por qué es un `LIKE` pelado ──────────────────────────
+     *
+     * Parece que falta algo, y no falta. En MySQL el cotejo de la COLUMNA es
+     * el que manda en la comparación (tiene menos coercibilidad que el
+     * parámetro), y las 91 tablas de datos están en `utf8mb4_0900_as_ci`:
+     * insensible a mayúsculas, SENSIBLE a acentos. Que es exactamente lo que
+     * hace `ILIKE` en Postgres.
+     *
+     * Medido el 27-oct sobre «Bogota», «Bogotá» y «BOGOTÁ»:
+     *
+     *   buscando    Postgres ILIKE   MySQL 0900_as_ci   MySQL unicode_ci
+     *   %bogotá%    Bogotá, BOGOTÁ   Bogotá, BOGOTÁ ✓   los tres        ✗
+     *   %bogota%    Bogota           Bogota         ✓   los tres        ✗
+     *
+     * O sea que con el cotejo de las tablas de datos CASA EXACTO. El otro
+     * —`utf8mb4_unicode_ci`, que usan las tablas de `001_identidad` y
+     * `002_archivos`— es acento-ciego y devolvería de más; no se toca aquí
+     * porque esas tablas no se consultan por este camino, pero está vigilado
+     * en `test/postgrest.filtros.test.js`.
+     *
+     * Los comodines `%` y `_` pasan tal cual: PostgREST también los trata como
+     * comodines, así que el comportamiento es el mismo. (El `*` que PostgREST
+     * admite como alias de `%` no se usa en ningún sitio: medido, cero.)
+     */
+    case 'ilike':
+      if (typeof f.valor !== 'string') noSoportado('`ilike` con algo que no es texto');
+      params.push(f.valor);
+      return `${c} LIKE ?`;
+
+    case 'not': {
+      if (profundidad > 0) noSoportado('un `not` dentro de otro `not`');
+      return `NOT (${condicion({ tipo: f.op, col: f.col, valor: f.valor }, params, profundidad + 1)})`;
+    }
+
+    default:
+      noSoportado(`el filtro \`${f.tipo}\``, 2);
+  }
+}
+
 /* ── Compilar ────────────────────────────────────────────────────────────
  *
  * Pura: ni base, ni red, ni reloj. Es lo que hace que la semántica se pueda
@@ -145,15 +264,7 @@ function compilar(plan) {
   const params = [];
 
   if (plan.filtros.length) {
-    const donde = plan.filtros.map((f) => {
-      if (f.tipo !== 'eq') noSoportado(`el filtro \`${f.tipo}\``, 2);
-      /* `eq` con null: PostgREST lo traduce a `IS NULL`, y en SQL `= NULL`
-         nunca casa con nada. Sin esto, un `.eq('borrado_at', null)` devolvería
-         cero filas en silencio en vez de las no borradas. */
-      if (f.valor === null) return `${ident(f.col, 'un `eq`')} IS NULL`;
-      params.push(f.valor);
-      return `${ident(f.col, 'un `eq`')} = ?`;
-    });
+    const donde = plan.filtros.map(f => condicion(f, params));
     partes.push(`WHERE ${donde.join(' AND ')}`);
   }
 
@@ -282,6 +393,39 @@ function constructor(tabla, opciones = {}) {
       plan.filtros.push({ tipo: 'eq', col, valor });
       return envuelto;
     },
+
+    /* El resto de filtros del tramo 2. Todos hacen lo mismo —apuntar en el
+       plan— porque quien decide qué SQL sale es `condicion()`, que es pura y
+       por eso se puede probar entera sin base. */
+    neq(col, valor) { plan.filtros.push({ tipo: 'neq', col, valor }); return envuelto; },
+    gt (col, valor) { plan.filtros.push({ tipo: 'gt',  col, valor }); return envuelto; },
+    gte(col, valor) { plan.filtros.push({ tipo: 'gte', col, valor }); return envuelto; },
+    lt (col, valor) { plan.filtros.push({ tipo: 'lt',  col, valor }); return envuelto; },
+    lte(col, valor) { plan.filtros.push({ tipo: 'lte', col, valor }); return envuelto; },
+    is (col, valor) { plan.filtros.push({ tipo: 'is',  col, valor }); return envuelto; },
+    in (col, valores) { plan.filtros.push({ tipo: 'in', col, valor: valores }); return envuelto; },
+    ilike(col, patron) { plan.filtros.push({ tipo: 'ilike', col, valor: patron }); return envuelto; },
+
+    not(col, op, valor) {
+      plan.filtros.push({ tipo: 'not', col, op, valor });
+      return envuelto;
+    },
+
+    /* `like` NO entra, y no es un olvido.
+     *
+     * En Postgres `LIKE` distingue mayúsculas y `ILIKE` no. En MySQL, con un
+     * cotejo `_ci`, `LIKE` NO las distingue — así que un `.like()` traducido a
+     * `LIKE` se comportaría como un `ilike` y devolvería de más, en silencio.
+     * Hacerlo bien pediría `LIKE ? COLLATE utf8mb4_0900_as_cs`.
+     *
+     * Cero usos hoy (medido). El día que entre uno, que salte aquí y se
+     * escriba a conciencia, en vez de parecer que funciona. */
+    like() { noSoportado('`like` (sensible a mayúsculas: en MySQL con cotejo `_ci` NO lo sería; usa `ilike` o pídelo con COLLATE … _cs)'); },
+
+    /* `match({a:1, b:2})` es azúcar para varios `eq`. Cero usos: el documento
+       del plan contaba 6 y eran `String.prototype.match(/regex/)`. No se
+       escribe lo que nadie usa. */
+    match() { noSoportado('`match` (cero usos medidos; son varios `eq` encadenados)'); },
 
     order(col, opts = {}) {
       /* Ordenar por una columna de una tabla relacionada necesita el JOIN, que
