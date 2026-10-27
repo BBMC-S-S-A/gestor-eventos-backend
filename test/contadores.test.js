@@ -226,3 +226,109 @@ test('el código de canje no lleva caracteres que se confunden al dictarlos', as
     assert.ok(!/[IO01]/.test(c), `«${c}» tiene caracteres ambiguos`);
   }
 });
+
+/* ── 4 · Lo vendido: aforo del evento y unidades por tipo ─────────────── */
+
+test('la suma va en UNA sentencia, no leyendo y escribiendo', async () => {
+  /* El corazón de la 0138. Antes de ella el backend leía el contador, sumaba
+     en Node y escribía el resultado: dos compras simultáneas leían lo mismo y
+     la segunda pisaba a la primera. Se midió perdiendo ventas en FESTECH.
+
+     Traducirlo a MySQL con un SELECT y luego un UPDATE sería volver al estado
+     anterior a la 0138. Así que lo que se protege aquí es que la suma esté
+     DENTRO del UPDATE. */
+  const sim = baseSimulada({ 'SELECT aforo_vendido': { valor: 7 } });
+  const m = cargarContadores(sim);
+
+  const r = await m.sumarAforoVendido('e1', 2);
+
+  const update = sim.sql.find(q => q.startsWith('UPDATE eventos'));
+  assert.ok(update, 'tiene que haber un UPDATE sobre eventos');
+  assert.match(update, /aforo_vendido = GREATEST\(0, COALESCE\(aforo_vendido, 0\) \+ \?\)/,
+    'la suma tiene que ocurrir dentro del UPDATE, no en JavaScript');
+  assert.equal(r.valor, 7);
+});
+
+test('no se lee el contador ANTES de sumarlo', async () => {
+  /* La forma exacta del fallo viejo: un SELECT del valor por delante del
+     UPDATE. Da igual que luego el UPDATE sume bien — si alguien decidiera algo
+     con ese número leído, la carrera vuelve. */
+  const sim = baseSimulada({ 'SELECT vendidos': { valor: 1 } });
+  const m = cargarContadores(sim);
+  await m.sumarVendidosTipo('t1', 1);
+
+  const iUpdate = sim.sql.findIndex(q => q.startsWith('UPDATE ticket_types'));
+  const iSelect = sim.sql.findIndex(q => q.includes('SELECT vendidos'));
+  assert.ok(iUpdate >= 0 && iSelect >= 0);
+  assert.ok(iUpdate < iSelect, 'el SELECT es para devolver el valor nuevo, así que va DESPUÉS');
+});
+
+test('el valor nuevo se lee dentro de la MISMA transacción', async () => {
+  /* MySQL no tiene RETURNING, así que el valor hay que leerlo aparte. Ese
+     SELECT sólo dice la verdad si el bloqueo del UPDATE sigue puesto — o sea,
+     dentro de la transacción. Fuera, el número leído sería el de después de la
+     suma de otro. */
+  const sim = baseSimulada({ 'SELECT aforo_vendido': { valor: 3 } });
+  const m = cargarContadores(sim);
+  await m.sumarAforoVendido('e1', 1);
+  assert.equal(sim.stats().transacciones, 1, 'UPDATE y SELECT van juntos o no vale');
+});
+
+test('el contador no baja de cero en un reembolso', async () => {
+  /* `GREATEST(0, …)` es del original y sólo importa con deltas negativos, que
+     son los reembolsos (routes/pagos.js). Sin él, devolver dos boletas de un
+     evento con una vendida deja el aforo en -1, y esa resta no se recupera. */
+  const sim = baseSimulada({ 'SELECT aforo_vendido': { valor: 0 } });
+  const m = cargarContadores(sim);
+  const r = await m.sumarAforoVendido('e1', -5);
+
+  assert.match(sim.sql.find(q => q.startsWith('UPDATE eventos')), /GREATEST\(0,/);
+  assert.equal(r.valor, 0);
+});
+
+test('un id que no existe revienta en vez de no hacer nada', async () => {
+  /* Diferencia deliberada con el original: en Postgres sumarle a un id que no
+     existe devuelve NULL en silencio. Un contador que no se actualizó porque
+     el id estaba mal no lo nota nadie hasta que el aforo no cuadre el día del
+     evento, y para entonces no se puede saber cuántas veces pasó. */
+  const sim = baseSimulada();   // sin respuesta para el SELECT → null, como MySQL
+  const m = cargarContadores(sim);
+  await assert.rejects(() => m.sumarAforoVendido('fantasma', 1), /No existe el evento/);
+  assert.equal(sim.stats().rollbacks, 1, 'y la transacción se deshace');
+});
+
+test('un delta que no es entero se rechaza antes de tocar la base', async () => {
+  /* Un `personas` mal calculado o un delta que llegó como texto no reventaría
+     solo: dejaría el contador con coma, y el aforo dejaría de cuadrar sin que
+     nada lo diga. Es el modo de fallo que este módulo existe para no tener. */
+  const sim = baseSimulada();
+  const m = cargarContadores(sim);
+
+  for (const malo of [1.5, '2', null, undefined, NaN]) {
+    await assert.rejects(() => m.sumarVendidosTipo('t1', malo), /entero/);
+  }
+  assert.equal(sim.sql.length, 0, 'ni una consulta con un delta inválido');
+});
+
+test('sin id no se suma a ciegas', async () => {
+  const sim = baseSimulada();
+  const m = cargarContadores(sim);
+  await assert.rejects(() => m.sumarAforoVendido(null, 1), /Falta el evento/);
+  await assert.rejects(() => m.sumarVendidosTipo(undefined, 1), /Falta el tipo de boleta/);
+  assert.equal(sim.sql.length, 0);
+});
+
+test('cada suma toca su tabla y su columna, no la del otro', async () => {
+  /* Las dos comparten implementación, así que un cruce de tabla y columna
+     sería silencioso: sumaría al contador equivocado sin fallar. */
+  const sim = baseSimulada({ 'SELECT vendidos': { valor: 1 }, 'SELECT aforo_vendido': { valor: 1 } });
+  const m = cargarContadores(sim);
+
+  await m.sumarAforoVendido('e1', 1);
+  await m.sumarVendidosTipo('t1', 1);
+
+  assert.ok(sim.sql.some(q => q.startsWith('UPDATE eventos SET aforo_vendido')));
+  assert.ok(sim.sql.some(q => q.startsWith('UPDATE ticket_types SET vendidos')));
+  assert.ok(!sim.sql.some(q => q.includes('eventos SET vendidos')));
+  assert.ok(!sim.sql.some(q => q.includes('ticket_types SET aforo_vendido')));
+});

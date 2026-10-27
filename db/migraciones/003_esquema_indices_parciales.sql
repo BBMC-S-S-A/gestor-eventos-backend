@@ -119,20 +119,28 @@ CREATE UNIQUE INDEX `torneo_categorias_unica_raiz`
   ON `torneo_categorias` (`evento_id`, `nombre_raiz`);
 
 
-/* 4 · waitlist: UNIQUE (evento_id, ticket_type_id, lower(guest_email))
- *               WHERE estado IN ('esperando', 'promovido')
+/* 4 · waitlist — BORRADO, y por qué no hay que volver a ponerlo.
  *
- * Un correo no puede estar dos veces en la lista de espera del mismo tipo de
- * boleta MIENTRAS espera. Cuando sale de la lista —comprada, vencida,
- * cancelada— la fila se queda como historial y tiene que poder repetirse: sin
- * la columna generada, alguien que se apuntó, no compró y vuelve a apuntarse
- * meses después chocaría con su propia fila vieja. */
-ALTER TABLE `waitlist`
-  ADD COLUMN `email_en_espera` VARCHAR(255)
-    AS (IF(`estado` IN ('esperando', 'promovido'), LOWER(`guest_email`), NULL)) VIRTUAL;
-
-CREATE UNIQUE INDEX `waitlist_uniq_email`
-  ON `waitlist` (`evento_id`, `ticket_type_id`, `email_en_espera`);
+ * Aquí había un único parcial sobre `waitlist`. Esa tabla **ya no existe**:
+ * era una DUPLICADA de `event_waitlist` que nunca recibió una fila, y
+ * `../migraciones/005_al_dia.sql` la borra junto a `missions`,
+ * `referral_codes` y `recordatorio_inapp_log`. El volcado del 15-sep ya no la
+ * crea.
+ *
+ * Medido: dejarlo aquí **rompía la carga entera**. `ALTER TABLE waitlist`
+ * sobre una tabla que no existe da `ERROR 1146`, y el cliente de MySQL se
+ * para en el primer error — así que todo lo que venía detrás (el §5, el único
+ * que impide dos reservas vivas del mismo espacio) **no se creaba**, y sin
+ * ruido: la carga «terminaba» y faltaba una regla de unicidad.
+ *
+ * La regla de negocio no se pierde. En `event_waitlist` —la que usa el
+ * código— el único NO es parcial, y ya está en `04_indices.sql`:
+ * `event_waitlist_evento_id_ticket_type_id_guest_email_key`.
+ *
+ * Comprobación de que no falta ninguno: los 9 índices que `04_indices.sql`
+ * marca «A MANO (único parcial)» están todos en este archivo. Éste era el
+ * décimo, y el único al que `04` no hacía referencia.
+ */
 
 
 /* 5 · espacio_reservas: UNIQUE (espacio_id) WHERE estado IN ('retenido','vendido')

@@ -1,6 +1,12 @@
 'use strict';
 
-/* Los tres sitios donde la base de datos hoy CUENTA por nosotros.
+/* Los cuatro sitios donde la base de datos hoy CUENTA por nosotros.
+ *
+ * Tres son disparadores y una función de Supabase (§1 a §3). El cuarto (§4)
+ * son las dos sumas de la migración 0138 —lo vendido de un evento y de cada
+ * tipo de boleta—, que no nacieron como disparador sino como el arreglo de un
+ * fallo medido en producción. Ése se lee aparte: es el único de los cuatro
+ * que ya perdió datos de verdad.
  *
  * Paso 4 de la fase 6 (ver db/migraciones/NOTAS-ESQUEMA.md): en MySQL no hay
  * disparadores que reproduzcan esto, así que se va al código. Y aquí está el
@@ -233,6 +239,106 @@ async function canjearRecompensa(userId, recompensaId) {
   });
 }
 
+/* ── 4 · Lo vendido: el aforo del evento y las unidades de cada tipo ──────
+ *
+ * Original: `public.sumar_aforo_vendido(p_evento, p_delta)` y
+ * `public.sumar_vendidos_tipo(p_tipo, p_delta)`, de la migración 0138.
+ *
+ * ── Por qué estas dos existen, que no es por gusto ───────────────────────
+ *
+ * Porque ya se perdieron ventas de verdad. Hasta la 0138 el backend leía el
+ * contador, le sumaba uno en Node y escribía el resultado. Dos compras a la
+ * vez leían el mismo número y la segunda escribía encima de la primera: el
+ * aforo decía 100 cuando se habían vendido 101. Se encontró analizando
+ * FESTECH —4.485 boletas, pico de 67 ingresos en cinco minutos— y la 0138 lo
+ * arregló metiendo la suma DENTRO de una sola sentencia, además de recalcular
+ * lo que ya se había perdido.
+ *
+ * O sea que esto no es un contador más: es el que ya falló. Traerlo a MySQL
+ * leyendo y escribiendo desde JavaScript sería volver exactamente al estado
+ * anterior a la 0138, con el agravante de que esta vez ya sabemos cómo acaba.
+ *
+ * ── Por qué aquí NO hace falta `SELECT ... FOR UPDATE` ───────────────────
+ *
+ * Y es la diferencia con los tres contadores de arriba, así que conviene
+ * dejarla escrita en vez de copiar el patrón por costumbre.
+ *
+ * Aquéllos tienen que LEER algo para DECIDIR —¿queda cuota?, ¿queda cupo?,
+ * ¿alcanza el saldo?—, y entre la lectura y la escritura cabe otra sesión. El
+ * bloqueo es lo que cierra ese hueco.
+ *
+ * Aquí no se decide nada: se suma. `UPDATE … SET x = GREATEST(0, COALESCE(x,0) + ?)`
+ * es UNA sentencia, y InnoDB toma el bloqueo exclusivo de la fila mientras la
+ * ejecuta. Dos sumas simultáneas se serializan solas. Un `FOR UPDATE` delante
+ * no añadiría ninguna garantía y sí un viaje más por cada boleta vendida.
+ *
+ * Es la misma forma del original, que también es una sola sentencia.
+ *
+ * ── Y entonces para qué la transacción ───────────────────────────────────
+ *
+ * Para poder devolver el valor nuevo. MySQL no tiene `RETURNING`, así que hay
+ * que leerlo con un `SELECT` aparte — y ese `SELECT` sólo dice la verdad si va
+ * dentro de la misma transacción que el `UPDATE`: el bloqueo exclusivo sigue
+ * puesto hasta el commit, así que nadie pudo tocar la fila en medio, y una
+ * transacción siempre ve sus propias escrituras.
+ *
+ * Fuera de la transacción, el valor leído sería el de después de la suma de
+ * OTRO, y un contador que informa mal es peor que uno que no informa.
+ *
+ * Hoy ninguna de las diez llamadas del código usa lo que devuelve —todas son
+ * `await supabase.rpc(...)` a secas—, así que esto es para quien venga.
+ */
+
+/* `GREATEST(0, …)` es del original: el contador nunca baja de cero. Importa en
+   los reembolsos, que son los únicos que pasan un delta negativo
+   (`routes/pagos.js`); sin esto, devolver dos boletas de un evento con una
+   vendida dejaría el aforo en -1 y esa resta no se recupera sola. */
+const SUMAS = {
+  aforo: { tabla: 'eventos',      col: 'aforo_vendido', que: 'evento' },
+  tipo : { tabla: 'ticket_types', col: 'vendidos',      que: 'tipo de boleta' },
+};
+
+async function sumar(cual, id, delta) {
+  const { tabla, col, que } = SUMAS[cual];
+
+  if (!id) throw new Error(`Falta el ${que} al que sumarle ${col}.`);
+
+  /* El original recibe un `int`. Un decimal colado aquí —un `personas` mal
+     calculado, un `delta` que llegó como texto— no reventaría: dejaría el
+     contador con coma y el aforo dejaría de cuadrar sin que nada lo diga, que
+     es el modo de fallo que este módulo entero existe para no tener. */
+  if (!Number.isInteger(delta)) {
+    throw new Error(`El delta de ${col} tiene que ser un entero; llegó ${JSON.stringify(delta)}.`);
+  }
+
+  return bd('datos').transaccion(async (cx) => {
+    const r = await cx.consultar(
+      `UPDATE ${tabla} SET ${col} = GREATEST(0, COALESCE(${col}, 0) + ?) WHERE id = ?`,
+      [delta, id],
+    );
+
+    const fila = await cx.unaFila(`SELECT ${col} AS valor FROM ${tabla} WHERE id = ?`, [id]);
+
+    /* Diferencia deliberada con el original: en Postgres, sumarle a un id que
+       no existe no hace nada y devuelve NULL, en silencio. Aquí revienta.
+       Un contador que no se actualizó porque el id estaba mal es justo lo que
+       nadie va a notar hasta que el aforo no cuadre el día del evento, y para
+       entonces no hay forma de saber cuántas veces pasó.
+
+       Se mira la fila y no `affectedRows`: MySQL cuenta ahí las filas que
+       CAMBIARON, no las que casaron, así que una suma que deja el mismo valor
+       —un delta 0, o un GREATEST que ya estaba en 0— devuelve 0 con la fila
+       existiendo perfectamente. */
+    if (!fila) throw new Error(`No existe el ${que} ${id}: ${col} no se actualizó.`);
+
+    return { valor: Number(fila.valor), cambio: r?.affectedRows ?? null };
+  });
+}
+
+/* Las dos puertas, con el nombre de lo que cuentan y no del cómo. */
+const sumarAforoVendido = (eventoId, delta) => sumar('aforo', eventoId, delta);
+const sumarVendidosTipo = (tipoId,   delta) => sumar('tipo',  tipoId,   delta);
+
 /* Diez caracteres en mayúsculas, como el original —`upper(substr(uuid,1,10))`—
    porque los códigos ya emitidos tienen esa forma y se leen en voz alta en un
    mostrador. Sin I, O, 0 ni 1: son las que se confunden al dictarlos. */
@@ -249,5 +355,7 @@ module.exports = {
   inscribirEnSesion,
   cambiarEstadoInscripcion,
   canjearRecompensa,
+  sumarAforoVendido,
+  sumarVendidosTipo,
   codigoCanje,
 };

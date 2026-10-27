@@ -4,6 +4,99 @@
 base real, no dicho de memoria. La última vez este archivo afirmaba lo mismo y
 había dos migraciones sin correr.
 
+## Lo comprobado y aplicado el 2026-10-27
+
+Comprobado contra producción con el conector, preguntando por cada objeto —no
+por el registro de migraciones, que el README ya avisa que «no es un
+inventario».
+
+### De la 0129 a la 0138: todas aplicadas
+
+Las 14 cosas que traen existen en la base. Consulta de comprobación al final
+de esta sección.
+
+| Nº | Qué se buscó | Estado |
+|---|---|---|
+| 0129 | `networking_expositores.nit` | ✅ |
+| 0130 | `private.fn_roles_semilla` | ✅ |
+| 0131 | `tickets_evento_creado_idx`, `tickets_nombre_trgm_idx` | ✅ |
+| 0132 | `tickets.escarapela_impresa_at` y `…_por` | ✅ |
+| 0133 | `tickets.contacto` | ✅ |
+| 0134 | `tickets.contacto_oculto` | ✅ |
+| 0135 | tabla `puerta_rechazos` | ✅ |
+| 0136 | `ticket_types.vigencia_cantidad`, `…_unidad`, `tickets.primer_ingreso_at` | ✅ |
+| 0138 | `sumar_aforo_vendido`, `sumar_vendidos_tipo` | ✅ |
+
+### 0139 — aplicada el 27-oct
+
+`search_path` fijado en las diez funciones que no lo tenían. Comprobado antes
+(las diez sin config) y después (las diez con `search_path=public, pg_temp`), y
+que las tres que se pueden llamar sin escribir nada siguen corriendo. El aviso
+«Function Search Path Mutable» del panel pasó de 10 hallazgos a **ninguno**.
+
+### El esquema cuadra con el volcado de MySQL
+
+Comparadas tabla por tabla: **85 en producción, 85 en MySQL**, y las dos únicas
+diferencias son las esperadas — `archivos` sólo existe en MySQL (la crea
+`002_archivos.sql`) y `zz_rollback_0126b_entregar` sólo en Postgres.
+
+## Lo que queda abierto, y no es una migración
+
+Tres cosas que salieron al comprobar lo de arriba. Ninguna urge; las tres
+conviene que no se olviden.
+
+1. **`zz_rollback_0126b_entregar` sigue puesta.** Es el respaldo de la 0126b,
+   del 17-sep. Más abajo en este mismo archivo está escrito que se puede borrar
+   «cuando el permiso lleve un tiempo funcionando». Lleva mes y medio.
+
+2. **`generar_recordatorios_inapp()` está rota.** Lee e inserta en
+   `public.recordatorio_inapp_log`, y esa tabla ya no existe: llamarla hoy
+   termina en «relation does not exist». Encaja con lo que ya dicen
+   `../migraciones/005_al_dia.sql` —la clasifica entre las que «nunca entró una
+   fila»— y el README —el ciclo de `pg_cron` y su Edge Function «están
+   muertos»—. El `drop` está escrito en el comentario de la 0139.
+
+3. **Tres avisos menores del panel**, los tres mirados y ninguno urgente:
+   la vista `perfiles_publicos` es SECURITY DEFINER (expone sólo `id`, `nombre`
+   y `avatar_url`, y sólo a `authenticated` — no a `anon`); `pg_net` y
+   `pg_trgm` viven en el esquema `public`; y la protección contra contraseñas
+   filtradas está apagada en Auth, que es un interruptor.
+
+   Los 20 avisos de «RLS activado sin políticas» **no son un hallazgo**: es la
+   doctrina del proyecto, escrita en la propia 0135 — «sólo el backend
+   (service role) escribe y lee. Sin políticas = cerrada».
+
+### La consulta que comprueba todo lo de arriba
+
+```sql
+with esperado(mig, objeto, tipo) as (values
+  ('0129','networking_expositores.nit','col'),
+  ('0130','private.fn_roles_semilla','fn'),
+  ('0131','tickets_evento_creado_idx','idx'),
+  ('0132','tickets.escarapela_impresa_at','col'),
+  ('0133','tickets.contacto','col'),
+  ('0134','tickets.contacto_oculto','col'),
+  ('0135','puerta_rechazos','tabla'),
+  ('0136','ticket_types.vigencia_unidad','col'),
+  ('0138','sumar_aforo_vendido','fn')
+)
+select mig, objeto,
+  case tipo
+    when 'col' then exists (select 1 from information_schema.columns
+        where table_schema='public' and table_name = split_part(objeto,'.',1)
+          and column_name = split_part(objeto,'.',2))
+    when 'tabla' then exists (select 1 from information_schema.tables
+        where table_schema='public' and table_name = objeto)
+    when 'idx' then exists (select 1 from pg_indexes
+        where schemaname='public' and indexname = objeto)
+    when 'fn' then exists (select 1 from pg_proc p join pg_namespace n on n.oid=p.pronamespace
+        where n.nspname||'.'||p.proname = (case when objeto like '%.%' then objeto else 'public.'||objeto end))
+  end as existe
+from esperado order by mig;
+```
+
+Todas tienen que dar `true`.
+
 ## Lo aplicado el 2026-09-17
 
 | Nº | Qué | Estado |
