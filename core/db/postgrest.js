@@ -32,14 +32,15 @@
  * es lo que hace supabase-js hoy y lo que el código de alrededor espera. Eso
  * no es una regresión: es el comportamiento de siempre.
  *
- * ── Lo que cubre hoy (tramos 1 a 3 de 8) ─────────────────────────────────
+ * ── Lo que cubre hoy (tramos 1 a 4 de 8) ─────────────────────────────────
  *
  *   Leer    from · select(columnas) · single · maybeSingle · order · limit
  *   Filtrar eq · neq · gt · gte · lt · lte · is · in · not · ilike
  *   Escribir insert · update · delete · upsert, con `.select()` detrás
+ *   Paginar range · count: 'exact' · head: true
  *
- * Todo lo demás —`or`, `count`, `range`, los JOIN embebidos, `rpc`— lanza con
- * un mensaje que dice en qué tramo entra. Los tramos están en
+ * Todo lo demás —`or`, los JOIN embebidos, `rpc`— lanza con un mensaje que
+ * dice en qué tramo entra. Los tramos están en
  * `db/EL-RESTO-DE-LAS-RUTAS.md` §3.
  *
  * ── Cómo está partido, y por qué ─────────────────────────────────────────
@@ -282,16 +283,61 @@ function compilar(plan) {
    *
    * Si quien llama puso su propio `limit`, manda el suyo: `.limit(5).single()`
    * tiene que fallar igual que falla hoy, no arreglarse solo. */
-  const limite = plan.limite ?? (plan.forma === 'muchas' ? null : 2);
-  if (limite !== null) {
-    if (!Number.isInteger(limite) || limite < 0) noSoportado(`un \`limit\` de «${plan.limite}»`);
-    /* El límite va pegado al SQL, no como parámetro: MySQL no admite `?` en
-       LIMIT con sentencias preparadas. Es seguro porque acaba de comprobarse
-       que es un entero. */
-    partes.push(`LIMIT ${limite}`);
+  /* ── El rango ────────────────────────────────────────────────────────
+   *
+   * `range(desde, hasta)` tiene los DOS extremos dentro: `range(0, 9)` son
+   * diez filas, no nueve. De ahí el `+ 1`. Equivocarse ahí no da error: da
+   * páginas que se solapan por una fila, y la última de cada página vuelve a
+   * salir la primera de la siguiente.
+   */
+  if (plan.rango) {
+    if (plan.limite !== null) {
+      noSoportado('`range` y `limit` a la vez (uno pisaría al otro y no está dicho cuál)');
+    }
+    const { desde, hasta } = plan.rango;
+    if (!Number.isInteger(desde) || !Number.isInteger(hasta) || desde < 0) {
+      noSoportado(`un \`range(${desde}, ${hasta})\``);
+    }
+    if (hasta < desde) noSoportado(`un \`range(${desde}, ${hasta})\`: el final va antes del principio`);
+    /* Pegados al SQL porque MySQL no admite `?` en LIMIT/OFFSET con sentencias
+       preparadas. Es seguro: acaban de comprobarse que son enteros. */
+    partes.push(`LIMIT ${hasta - desde + 1} OFFSET ${desde}`);
+  } else {
+    const limite = plan.limite ?? (plan.forma === 'muchas' ? null : 2);
+    if (limite !== null) {
+      if (!Number.isInteger(limite) || limite < 0) noSoportado(`un \`limit\` de «${plan.limite}»`);
+      partes.push(`LIMIT ${limite}`);
+    }
   }
 
   return { sql: partes.join(' '), params };
+}
+
+/* La consulta que cuenta.
+ *
+ * Es OTRA consulta, no la misma con un COUNT delante, y eso es el asunto
+ * entero: **el conteo ignora el `range` y el `limit`**.
+ *
+ * No es una interpretación. PostgREST devuelve el total en la cabecera
+ * `Content-Range` (`0-9/1234`), y `routes/eventos.js:142` pide `count: 'exact'`
+ * junto con `.range(tramo.desde, tramo.hasta)` y usa el `count` para paginar.
+ * Si el conteo respetara el rango, esa pantalla diría «10 de 10» en vez de «10
+ * de 1234» — o sea que la paginación de producción ya estaría rota hoy. No lo
+ * está, luego el conteo es el total.
+ *
+ * Por eso se queda con el WHERE y tira el ORDER BY (no cambia cuántas hay y
+ * cuesta) y el LIMIT.
+ *
+ * Son dos viajes a la base en vez de uno. `SQL_CALC_FOUND_ROWS` haría uno
+ * solo, pero está obsoleto desde MySQL 8.0.17 y la propia documentación de
+ * MySQL recomienda justamente estas dos consultas.
+ */
+function compilarConteo(plan) {
+  const params = [];
+  const donde = plan.filtros.map(f => condicion(f, params));
+  const sql = `SELECT COUNT(*) AS n FROM ${ident(plan.tabla, 'un `from`')}`
+            + (donde.length ? ` WHERE ${donde.join(' AND ')}` : '');
+  return { sql, params };
 }
 
 /* ── Ejecutar ────────────────────────────────────────────────────────────
@@ -310,8 +356,18 @@ function errorPgrst(mensaje, { code = 'PGRST116', details = null, hint = null } 
 
 async function ejecutar(plan, { base = bd('datos') } = {}) {
   let filas;
+  let cuenta = null;
   try {
     if (plan.accion === 'select') {
+      if (plan.contar) {
+        const c = compilarConteo(plan);
+        cuenta = Number((await base.consultar(c.sql, c.params))[0].n);
+      }
+      /* `head: true` es «cuéntalas, no me las traigas». supabase-js hace una
+         petición HEAD y `data` vuelve null; traer las filas igual sería
+         trabajo que nadie pidió, y son 44 de los 54 usos. */
+      if (plan.soloContar) return { data: null, error: null, count: cuenta };
+
       const { sql, params } = compilar(plan);
       filas = await base.consultar(sql, params);
     } else {
@@ -336,9 +392,9 @@ async function ejecutar(plan, { base = bd('datos') } = {}) {
     };
   }
 
-  if (plan.forma === 'muchas') return { data: filas, error: null, count: null };
+  if (plan.forma === 'muchas') return { data: filas, error: null, count: cuenta };
 
-  if (filas.length === 1) return { data: filas[0], error: null, count: null };
+  if (filas.length === 1) return { data: filas[0], error: null, count: cuenta };
 
   if (filas.length === 0) {
     /* `maybeSingle()` con cero filas NO es un error: devuelve null limpio. Es
@@ -700,6 +756,9 @@ function constructor(tabla, opciones = {}) {
     filtros : [],
     orden   : [],
     limite  : null,
+    rango   : null,    // { desde, hasta }, los dos inclusive
+    contar  : null,    // 'exact'
+    soloContar: false, // head: true — contar sin traer filas
     forma   : 'muchas',
     /* Escrituras */
     filas      : null,   // insert / upsert
@@ -711,9 +770,21 @@ function constructor(tabla, opciones = {}) {
 
   const api = {
     select(seleccion, extra) {
-      /* `select('*', { count: 'exact' })` — 53 usos, y contar tiene su propia
-         semántica (¿antes o después del `limit`?). Tramo 4. */
-      if (extra && extra.count) noSoportado('`select` con `count`', 4);
+      if (extra && extra.count) {
+        /* Sólo `exact`. `planned` y `estimated` de PostgREST salen del
+           planificador de Postgres y dan un número APROXIMADO; traducirlos a
+           un COUNT(*) de verdad sería «mejor», y por eso mismo sería mentira:
+           quien pidió una estimación esperaba que fuera barata, no exacta.
+           Cero usos hoy, los 54 son `exact`. */
+        if (extra.count !== 'exact') noSoportado(`\`count: '${extra.count}'\``);
+        if (plan.accion !== 'select') noSoportado('`count` detrás de una escritura');
+        plan.contar = 'exact';
+        /* `head: true` es «cuéntalas, no me las traigas»: 44 de los 54 usos.
+           supabase-js hace una petición HEAD y `data` vuelve null. */
+        plan.soloContar = extra.head === true;
+      } else if (extra && extra.head) {
+        noSoportado('`head` sin `count` (no devolvería ni filas ni cuenta)');
+      }
       plan.columnas = columnas(seleccion);
       /* Detrás de una escritura, `.select()` no elige qué leer: pide que la
          escritura DEVUELVA lo escrito. En Postgres es el `RETURNING`; aquí
@@ -813,6 +884,16 @@ function constructor(tabla, opciones = {}) {
       return envuelto;
     },
 
+    /* `range(desde, hasta)`, **los dos inclusive** — es un rango de índices de
+       fila, no un «desde + cuántos». `range(0, 9)` son diez filas. Es la forma
+       en que PostgREST lo hereda de la cabecera HTTP `Range`, y equivocarse en
+       el borde da páginas que se solapan por una fila: la última de cada página
+       vuelve a salir la primera en la siguiente, y nadie lo llama un fallo. */
+    range(desde, hasta) {
+      plan.rango = { desde, hasta };
+      return envuelto;
+    },
+
     single() {
       plan.forma = 'una';
       return envuelto;
@@ -873,3 +954,4 @@ module.exports.crear = crear;
 module.exports._compilar = compilar;
 module.exports._noSoportado = noSoportado;
 module.exports._valorEscribible = valorEscribible;
+module.exports._compilarConteo = compilarConteo;

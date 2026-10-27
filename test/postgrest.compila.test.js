@@ -128,12 +128,13 @@ test('un método que no existe lanza y dice cuál era', () => {
   /* Sin el Proxy esto sería «or is not a function», que no distingue entre
      «falta implementarlo» y «está mal escrito».
 
-     `ilike`, `in` e `is` estaban aquí hasta el tramo 2, que los implementó.
-     Sus pruebas viven ahora en `postgrest.filtros.test.js`; esta se queda con
-     los que de verdad siguen sin soporte. */
+     Esta lista se va vaciando sola: `ilike`, `in` e `is` salieron en el tramo
+     2 y `range` en el tramo 4. Sus pruebas viven en `postgrest.filtros.test.js`
+     y `postgrest.contar.test.js`; aquí quedan los que de verdad siguen sin
+     soporte. */
   lanza(() => pg.from('t').select('*').or('a.eq.1,b.eq.2'), /\.or\(\)/);
   lanza(() => pg.from('t').select('*').contains('zonas', ['vip']), /\.contains\(\)/);
-  lanza(() => pg.from('t').select('*').range(0, 9), /\.range\(\)/);
+  lanza(() => pg.from('t').select('*').overlaps('zonas', ['vip']), /\.overlaps\(\)/);
   lanza(() => pg.from('t').select('*').textSearch('nombre', 'ana'), /\.textSearch\(\)/);
 });
 
@@ -151,9 +152,9 @@ test('los JOIN embebidos lanzan y mandan al tramo 5', () => {
   lanza(() => pg.from('posts').select('*, autor:profiles!autor_id(id, nombre)'), /tramo 5/);
 });
 
-test('contar lanza y manda al tramo 4', () => {
-  lanza(() => pg.from('t').select('*', { count: 'exact' }), /tramo 4/);
-});
+/* Aquí había una prueba de que `count` lanzaba y mandaba al tramo 4. Ese
+   tramo lo implementó; contar y paginar se prueban en
+   `postgrest.contar.test.js`. */
 
 test('las funciones lanzan y mandan al tramo 7', () => {
   lanza(() => pg.rpc('aforo_zonas', { p_evento: 'x' }), /tramo 7/);
