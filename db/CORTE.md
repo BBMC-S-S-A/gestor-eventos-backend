@@ -486,11 +486,15 @@ que el §4 tenga sentido. Al 27 de octubre:
 | Semillas de evento (roles, canales) en `modules/eventos/semillas.js` | ✅ hecho |
 | Lo vendido: las 13 llamadas pasan por `lib/contadores.js` y obedecen a `DATOS_PROPIOS` | ✅ hecho |
 | **Cablear el RESTO de las rutas a MySQL** (los 43 archivos que usan Supabase directo) | ⬜ **falta** |
-| **Las 8 columnas `ARRAY` → `JSON`**: lo que hoy se consulta con `@>` o `= ANY()` hay que reescribirlo con `JSON_CONTAINS` / `MEMBER OF` | ⬜ **falta** |
+| Las 8 columnas `ARRAY` → `JSON` | ✅ hecho — resultó ser una sola consulta; ver NOTAS-ESQUEMA |
 | Los 5 uploaders del frontend, que hoy suben directo a Supabase | ⬜ falta (va con el §7) |
 
-La de los `ARRAY` es la que más cuidado pide: `event_members.custom_permissions`
-la lee `core/permisos/cargarEvento()`, o sea **el guardia de las 378 rutas**.
-Cuando se toque, la prueba de permisos tiene que seguir en verde.
+La de los `ARRAY` se creía la más brava —`event_members.custom_permissions`
+la lee `core/permisos/cargarEvento()`, el guardia de las 378 rutas— y medida
+resultó ser la más pequeña: leerlas no cambia nada (mysql2 entrega la columna
+JSON como array de JS), escribirlas pide `JSON.stringify` y falla ruidoso si
+se olvida, y consultarlas con operadores de Postgres había **una sola vez** en
+todo el código. El detalle, en `migraciones/NOTAS-ESQUEMA.md`.
 
-El detalle de las ocho columnas está en `migraciones/NOTAS-ESQUEMA.md`.
+Así que lo único grande que queda de verdad es **el resto de las rutas**: los
+43 archivos que hablan con Supabase directo.
