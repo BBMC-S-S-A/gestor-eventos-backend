@@ -77,11 +77,11 @@ hecho:
 | `sumar_aforo_vendido`, `sumar_vendidos_tipo` | `modules/contadores/` | ✅ hecho y cableado |
 | `aforo_zonas` ×4 | `modules/aforo/consultas.js` | ✅ escrito, sin cablear |
 | `canjear_recompensa` | `modules/contadores/` | ✅ escrito, sin cablear |
-| `retener_espacio`, `liberar_espacio`, `confirmar_espacio` | pendiente | ⬜ |
-| `promocion_consumir` | pendiente | ⬜ |
-| `find_pending_reminders` | pendiente | ⬜ |
-| `oauth_barrer` | dos `delete`, trivial | ⬜ |
-| `generar_recordatorios_inapp` | **está rota** — su tabla ya no existe | borrar |
+| `retener_espacio`, `liberar_espacio`, `confirmar_espacio` | `modules/espacios/` | ✅ |
+| `promocion_consumir` | `modules/promociones/` | ✅ |
+| `find_pending_reminders` | `modules/recordatorios/` (ya estaba) | ✅ |
+| `oauth_barrer` | `modules/oauth/` | ✅ |
+| `generar_recordatorios_inapp` | `modules/recordatorios/` — **arreglada** | ✅ |
 
 ---
 
@@ -164,7 +164,7 @@ Cada tramo deja algo que se puede probar solo, y ninguno cambia nada mientras
 | 5 | **Los 66 JOIN embebidos** | Empezando por el de `lib/acceso.js`, con la prueba de permisos en verde | ✅ |
 | 5b | `!inner` y filtrar por columna embebida | Los 2 que faltaban | ✅ |
 | 6 | `.or()` y su gramática | Las cinco formas que hay hoy | ✅ |
-| 7 | Las 12 `.rpc()` que faltan | Una por una | ⬜ |
+| 7 | Las 12 `.rpc()` que faltan | Una por una | ✅ |
 | 8 | La comparación final: las mismas consultas contra los dos motores | `scripts/comparar-bases.js` ampliado | ⬜ |
 
 ---
@@ -538,6 +538,68 @@ arreglo no necesite tocarlo.
 | un `and()` vacío | |
 | `or` sobre una tabla relacionada | |
 | un `in` sin paréntesis | |
+
+---
+
+## 12 · Tramo 7 — las funciones
+
+Las 12 `.rpc()` del código, más las 2 sumas que `lib/contadores.js` llama por
+su cuenta. **14 en la tabla de despacho**, que es una tabla y no un `switch`
+para poder recorrerla: una prueba busca todos los `.rpc('…')` del código y
+comprueba que están.
+
+| Función | Dónde vive | |
+|---|---|---|
+| `aforo_zonas` ×4 | `modules/aforo/consultas.js` | ya estaba |
+| `canjear_recompensa`, `sumar_*` ×2 | `modules/contadores/` | ya estaba |
+| `find_pending_reminders`, `generar_recordatorios_inapp` | `modules/recordatorios/` | ya estaba |
+| `retener_espacio`, `liberar_espacio`, `confirmar_espacio` | **`modules/espacios/`** | nuevo |
+| `promocion_consumir` | **`modules/promociones/`** | nuevo |
+| `oauth_barrer` | **`modules/oauth/`** | nuevo |
+
+### Lo que no se pierde: la unicidad la sigue decidiendo la base
+
+En Postgres, un índice único **parcial** impide vender dos veces la misma
+silla: `UNIQUE (espacio_id) WHERE estado IN ('retenido','vendido')`. MySQL no
+tiene índices parciales, pero el volcado ya lo reproduce con una columna
+generada:
+
+```sql
+espacio_activo = IF(estado IN ('retenido','vendido'), espacio_id, NULL)
+UNIQUE (espacio_activo)
+```
+
+Así que **la carrera la corta la base, no JavaScript**. `retener_espacio` no
+comprueba si el espacio está libre: lo intenta, y traduce el `ER_DUP_ENTRY` a
+`ESPACIO_OCUPADO`. Comprobarlo antes sería el fallo clásico — los dos leen
+«libre», los dos insertan, la silla se vende dos veces.
+
+Lo mismo con `promocion_consumir`: **una sola sentencia**, con el límite dentro
+del `WHERE`. Leer, comparar y escribir dejaría que dos personas gastaran el
+último cupón a la vez.
+
+### `generar_recordatorios_inapp` no se borra: empieza a funcionar
+
+El documento decía «borrarla». Al portarla salió algo mejor: la función de
+Postgres **nunca ha creado una sola fila** —inserta en `notificaciones` una
+columna `link` que esa tabla no tiene, y `recordatorio_inapp_log` ni siquiera
+existe (comprobado contra producción el 27-oct)—, y `modules/recordatorios` ya
+la tenía **reescrita y arreglada**.
+
+> O sea que al migrar, **esto empieza a funcionar**. No es una regresión, pero
+> conviene saberlo antes de que aparezcan avisos dentro de la aplicación que
+> nadie había visto nunca.
+
+### Los errores conservan su nombre
+
+`ESPACIO_NO_EXISTE`, `ESPACIO_NO_VENDIBLE`, `ESPACIO_DE_OTRO_EVENTO` y
+`ESPACIO_OCUPADO`. Las rutas los miran **por el texto**, así que cambiarlos
+rompería el mensaje que ve quien compra sin que ninguna prueba se enterara.
+
+Por eso un error de dentro de una función vuelve como `{ error }` y no
+lanzado: es lo que hace supabase-js, y hay una ruta que lee
+`error.message === 'ESPACIO_OCUPADO'`. Lo que **sí** lanza es pedir una función
+que no existe — eso es un fallo de cableado, no un caso de negocio.
 
 ### Lo que NO está cableado todavía
 
