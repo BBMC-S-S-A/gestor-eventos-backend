@@ -165,7 +165,7 @@ Cada tramo deja algo que se puede probar solo, y ninguno cambia nada mientras
 | 5b | `!inner` y filtrar por columna embebida | Los 2 que faltaban | ✅ |
 | 6 | `.or()` y su gramática | Las cinco formas que hay hoy | ✅ |
 | 7 | Las 12 `.rpc()` que faltan | Una por una | ✅ |
-| 8 | La comparación final: las mismas consultas contra los dos motores | `scripts/comparar-bases.js` ampliado | ⬜ |
+| 8 | La comparación final: las mismas consultas contra los dos motores | `scripts/comparar-consultas.js` | ✅ |
 
 ---
 
@@ -600,6 +600,68 @@ Por eso un error de dentro de una función vuelve como `{ error }` y no
 lanzado: es lo que hace supabase-js, y hay una ruta que lee
 `error.message === 'ESPACIO_OCUPADO'`. Lo que **sí** lanza es pedir una función
 que no existe — eso es un fallo de cableado, no un caso de negocio.
+
+---
+
+## 13 · Tramo 8 — la comparación final
+
+**`scripts/comparar-consultas.js`**. Corre las mismas consultas contra
+PostgREST y contra el adaptador y compara lo que devuelven.
+
+```bash
+node scripts/comparar-consultas.js --evento=<uuid> --detalle
+```
+
+Sale con **código 1** si algo no cuadra, para poder usarlo como puerta en el
+`CORTE.md` y no como un informe que alguien lee por encima.
+
+### No es lo mismo que `comparar-bases.js`
+
+| | Pregunta |
+|---|---|
+| `comparar-bases.js` | ¿llegaron los datos intactos? — cuenta filas y huella por tabla |
+| `comparar-consultas.js` | **dada la misma consulta, ¿responden lo mismo?** |
+
+Se pueden haber cargado los datos perfectos y aun así una consulta devolver de
+más o de menos, porque un filtro se tradujo mal o un embebido volvió como lista
+en vez de objeto. Hacen falta los dos, y en ese orden.
+
+### SÓLO LEE — y eso se comprueba, no se promete
+
+Correr un `insert` contra los dos motores dejaría basura en producción; un
+`update` o un `delete`, algo peor.
+
+1. Cada consulta se arma primero contra el adaptador y **se le mira el plan**.
+   Si no es un `select`, el script **para** — no la salta: una entrada de
+   escritura en este catálogo es un error que hay que arreglar.
+2. De las funciones sólo entran las que leen, por **lista de inclusión**.
+
+`test/compararConsultas.test.js` vigila las dos cosas sin tocar ninguna base,
+y cruza la lista contra la tabla del adaptador para que una función que
+escribe no pueda colarse.
+
+### El catálogo
+
+24 consultas reales del código (18 sin `--evento`), repartidas por tramo, con
+las cinco que vigilan **lo que no da error**:
+
+- el orden de los NULL, ascendente y descendente
+- **EL GUARDIA** — `event_members` con su rol, la consulta de `lib/acceso.js`
+- **EL PARÉNTESIS** — un `or` combinado con un `eq`
+- el `count` junto al `range`, que el total no puede recortar
+
+Una prueba comprueba que esas cinco siguen en el catálogo: si alguien las
+quita, el informe diría «todo cuadra» sin haber mirado justo lo que importa.
+
+### La normalización baja por los embebidos
+
+Y eso lo descubrió una mutación que **ninguna prueba cazaba**: quitar la
+recursión no rompía nada, porque la diferencia se seguía viendo. Lo que se
+pierde sin recorrer es la normalización de los valores de DENTRO — la misma
+fecha escrita como la da Postgres y como la da MySQL saldría distinta, y el
+informe marcaría diferencias que no existen. Con un embebido por consulta y
+cincuenta filas, eso es un informe inservible: o sea, uno que se acaba
+ignorando.
 
 ### Lo que NO está cableado todavía
 
