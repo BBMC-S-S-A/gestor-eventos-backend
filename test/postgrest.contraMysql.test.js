@@ -470,9 +470,70 @@ test('adaptador contra MySQL de verdad', { skip: SALTAR && 'pon MYSQL_PRUEBAS=1'
     assert.equal(count, 0);
   });
 
+  /* ── Tramo 6: `.or()` ──────────────────────────────────────────────── */
+
+  await t.test('EL PARÉNTESIS: un or junto a un eq no se lleva filas de otro dueño', async () => {
+    /* La prueba que justifica el tramo. En SQL, `a = 1 AND b = 2 OR c = 3` se
+       lee `(a AND b) OR c`. Sin envolver el `or`, esta consulta —el patrón de
+       «buscar dentro de MI evento»— devolvería también las filas de otros
+       dueños que casen con la búsqueda. Sin error, y con datos de otro. */
+    /* No se compara contra una lista fija de ids: los tramos de escritura de
+       más arriba dejan filas en esta misma tabla. Se comprueba la PROPIEDAD,
+       que es lo que de verdad importa y no se descuadra. */
+    const { data, error } = await pg.from('eventos').select('id, owner_id')
+      .eq('owner_id', 'juan')
+      .or('nombre.ilike.%o%,id.eq.e');
+
+    assert.equal(error, null);
+    assert.ok(data.length > 0, 'la consulta no devolvió nada: así no prueba nada');
+    const ajenas = data.filter(f => f.owner_id !== 'juan');
+    assert.deepEqual(ajenas, [],
+      'se colaron filas de otro dueño: el `or` no está entre paréntesis');
+    /* `e` es de ana y casa con el segundo lado del `or`. Sin paréntesis
+       vendría; con ellos, no. Es el caso concreto. */
+    assert.ok(!data.some(f => f.id === 'e'), 'vino `e`, que es de ana');
+  });
+
+  await t.test('el or anidado con and() — el cursor de la lista de clientes', async () => {
+    const { data } = await pg.from('eventos').select('id, fecha')
+      .or('fecha.lt.2026-02-01,and(fecha.eq.2026-02-01,id.lt.z)')
+      .order('id');
+    assert.ok(data.some(f => f.id === 'a'), 'falta `a` (01-ene, por el primer lado)');
+    assert.ok(data.some(f => f.id === 'd'), 'falta `d` (01-feb, por el and anidado)');
+    /* Lo que NO puede venir: una fecha posterior al 1 de febrero. Si el `and`
+       se aplanara, `fecha.eq.2026-02-01` dejaría de atar y entrarían. */
+    assert.deepEqual(data.filter(f => f.fecha && f.fecha > new Date('2026-02-01')), [],
+      'se aplanó el and(): entraron fechas posteriores');
+  });
+
+  await t.test('el or con una lista in.(…)', async () => {
+    const { data } = await pg.from('eventos').select('id, nombre')
+      .or('id.in.(a,c),nombre.eq.Borrado').order('id');
+    assert.deepEqual(data.map(f => f.id).sort(), ['a', 'c', 'd'],
+      'las comas de dentro del in.(…) no son separadores de condición');
+  });
+
+  await t.test('el or con is null', async () => {
+    const { data } = await pg.from('eventos').select('id, fecha')
+      .or('fecha.is.null,id.eq.a').order('id');
+    assert.ok(data.some(f => f.id === 'b'), 'falta `b`, que tiene la fecha a NULL');
+    assert.ok(data.some(f => f.id === 'a'), 'falta `a`, que casa por el segundo lado');
+    const coladas = data.filter(f => f.fecha !== null && f.id !== 'a');
+    assert.deepEqual(coladas, [], 'vinieron filas con fecha que no son `a`');
+  });
+
+  await t.test('el conteo también ve el or', async () => {
+    const { data, count } = await pg.from('eventos')
+      .select('id', { count: 'exact' })
+      .or('id.eq.a,id.eq.c').range(0, 0);
+    assert.equal(data.length, 1);
+    assert.equal(count, 2, 'el conteo ignoró el or');
+  });
+
   await t.test('un método no soportado LANZA aunque haya base detrás', async () => {
     await assert.rejects(
-      async () => { await pg.from('eventos').select('*').or('a.eq.1,b.eq.2'); },
+      /* `or` salió de esta lista en el tramo 6. */
+      async () => { await pg.from('eventos').select('*').contains('zonas', ['vip']); },
       (e) => e.code === 'PGRST_NO_SOPORTADO');
   });
 });
