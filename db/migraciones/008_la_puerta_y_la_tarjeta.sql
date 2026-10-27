@@ -13,6 +13,7 @@
 --   0136  vigencia por duración                   (tres columnas y dos reglas)
 --   0137  cerrar funciones y vistas públicas      → NO va aquí, ver §7
 --   0138  dos ventas a la vez                     → NO va aquí, ver §7
+--   0139  el camino de búsqueda de las diez       → NO va aquí, ver §7
 --
 -- ── Por qué existe este archivo ────────────────────────────────────────
 --
@@ -304,6 +305,22 @@ UPDATE `tickets` SET `primer_ingreso_at` = `checked_in_at`
 --   Es trabajo de código, no de SQL, y por eso no está aquí. Pero **tiene que
 --   estar hecho antes del corte**, y es la razón por la que esta nota ocupa
 --   veinte líneas en vez de dos.
+--
+--   (Hecho el 27-oct: `modules/contadores/` ya trae `sumarAforoVendido()` y
+--   `sumarVendidosTipo()`. Lo que sigue pendiente es cablear las diez llamadas
+--   para que dejen de ir por `supabase.rpc` cuando mande MySQL.)
+--
+-- **0139 · el camino de búsqueda de las diez.** Fija el `search_path` de diez
+-- funciones de Postgres. **MySQL no tiene `search_path`**: una conexión se abre
+-- contra una base y ahí se queda, así que no hay nada que traducir — ni una
+-- línea.
+--
+--   Se declara aquí de todas formas porque
+--   `test/elEsquemaMysqlNoSeQuedaAtras.test.js` no sabe leer qué hace cada
+--   migración: sólo comprueba que ninguna quede sin mencionar. Una migración
+--   que no necesita lado MySQL se declara igual, diciendo por qué. Es más
+--   barato que enseñarle a la prueba a distinguir, y deja la decisión escrita
+--   donde se busca.
 
 
 SET FOREIGN_KEY_CHECKS = 1;
