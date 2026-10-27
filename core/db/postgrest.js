@@ -98,15 +98,124 @@ function ident(nombre, de) {
  * columna y MySQL daría un error de sintaxis a destiempo, con un mensaje que no
  * explicaría nada.
  */
-function columnas(seleccion) {
-  const s = String(seleccion ?? '*').trim();
-  if (s === '*') return '*';
-  if (s.includes('(')) noSoportado('un `select` con JOIN embebido', 5);
-  if (s.includes(':')) noSoportado('un `select` con renombrado (`alias:columna`)', 1);
+/* Parte una selección por las comas DE ARRIBA: las que están dentro de un
+   paréntesis pertenecen al embebido y no separan campos del padre. Un
+   `split(',')` a secas partiría `tipo:ticket_types!x(id, nombre)` por la mitad
+   y el error saldría como un nombre de columna raro, tres pasos más allá. */
+function porComasDeArriba(texto) {
+  const partes = [];
+  let prof = 0, actual = '';
+  for (const c of texto) {
+    if (c === '(') prof++;
+    else if (c === ')') prof--;
+    if (c === ',' && prof === 0) { partes.push(actual); actual = ''; continue; }
+    actual += c;
+  }
+  if (prof !== 0) noSoportado(`un \`select\` con los paréntesis descuadrados: \`${texto.trim()}\``);
+  partes.push(actual);
+  return partes.map(p => p.trim()).filter(Boolean);
+}
 
-  const partes = s.split(',').map(p => p.trim()).filter(Boolean);
-  if (!partes.length) noSoportado('un `select` vacío');
-  return partes.map(c => (c === '*' ? '*' : ident(c, 'un `select`'))).join(', ');
+/* La cabeza de un embebido: `[alias:]tabla[!fk][!inner]`.
+ *
+ * Las cuatro formas que hay en el código:
+ *
+ *   categoria:categorias(…)                  alias, sin decir la clave
+ *   autor:profiles!autor_id(…)               alias y clave
+ *   speakers!speaker_id(…)                   sin alias
+ *   profile:profiles!user_id!inner(…)        y además inner
+ *
+ * Sin alias, PostgREST usa el nombre de la tabla como nombre del campo. */
+function cabezaDeEmbebido(cabeza) {
+  let alias = null;
+  let resto = cabeza;
+  const dosPuntos = cabeza.indexOf(':');
+  if (dosPuntos !== -1) {
+    alias = cabeza.slice(0, dosPuntos).trim();
+    resto = cabeza.slice(dosPuntos + 1).trim();
+  }
+
+  const trozos = resto.split('!').map(t => t.trim());
+  const tabla = trozos.shift();
+  let inner = false;
+  let fk = null;
+  for (const t of trozos) {
+    if (t === 'inner') inner = true;
+    else if (t === 'left') inner = false;
+    else if (fk === null) fk = t;
+    else noSoportado(`un embebido con dos claves (\`${cabeza}\`)`);
+  }
+
+  if (!FORMA_IDENT.test(tabla)) noSoportado(`el nombre de tabla \`${tabla}\` en un embebido`);
+  if (alias !== null && !FORMA_IDENT.test(alias)) noSoportado(`el alias \`${alias}\` en un embebido`);
+  if (fk !== null && !FORMA_IDENT.test(fk)) noSoportado(`la clave \`${fk}\` en un embebido`);
+
+  return { alias: alias || tabla, tabla, fk, inner };
+}
+
+/* ── El `select`, ya con embebidos (tramo 5) ─────────────────────────────
+ *
+ * PostgREST mete tres cosas distintas en la misma cadena:
+ *
+ *   'id, nombre'                             → columnas
+ *   'alias:columna'                          → renombrado. Cero usos; lanza.
+ *   '*, autor:profiles!autor_id(id, nombre)' → embebido. 66 usos.
+ *
+ * Devuelve el árbol: los campos del padre y la lista de embebidos, cada uno
+ * con su propia selección dentro —porque los hay ANIDADOS, tres en el código:
+ *
+ *   ticket:tickets!ticket_id(guest_nombre, codigo, tipo:ticket_types!x(nombre))
+ */
+function parsearSeleccion(seleccion, nivel = 0) {
+  if (nivel > 3) noSoportado('un embebido anidado más de tres niveles');
+
+  const texto = String(seleccion ?? '*').trim();
+  if (!texto) noSoportado('un `select` vacío');
+
+  const campos = [];
+  const embebidos = [];
+
+  for (const parte of porComasDeArriba(texto)) {
+    const abre = parte.indexOf('(');
+    if (abre === -1) {
+      if (parte === '*') { campos.push('*'); continue; }
+      /* Un `alias:columna` sin paréntesis es un renombrado. Cero usos medidos;
+         traducirlo a `columna AS alias` sería fácil y por eso mismo peligroso:
+         nadie lo probaría nunca. */
+      if (parte.includes(':')) noSoportado('un `select` con renombrado (`alias:columna`)');
+      campos.push(ident(parte, 'un `select`'));
+      continue;
+    }
+    if (!parte.endsWith(')')) noSoportado(`un embebido mal cerrado: \`${parte}\``);
+    const cabeza = cabezaDeEmbebido(parte.slice(0, abre).trim());
+    embebidos.push({ ...cabeza, seleccion: parsearSeleccion(parte.slice(abre + 1, -1), nivel + 1) });
+  }
+
+  if (!campos.length && !embebidos.length) noSoportado('un `select` vacío');
+  return { campos, embebidos };
+}
+
+/* Lo que va en el SELECT del padre: sus campos, más las columnas que hacen
+   falta para ir a buscar los embebidos aunque nadie las haya pedido. Las que
+   se añaden se apuntan en `sobran` para borrarlas de la respuesta: PostgREST
+   no devuelve `rol_id` si sólo pidieron `custom_permissions` y `rol_detail`, y
+   devolverla de más sería una diferencia tonta que acaba en una pantalla. */
+function columnasDelPadre(arbol, extras = []) {
+  if (arbol.campos.includes('*')) return { sql: '*', sobran: [] };
+  const puestas = new Set(arbol.campos.map(c => c.replace(/`/g, '')));
+  /* `Set` porque dos embebidos pueden ir por la misma columna, y repetirla
+     daría un `SELECT a, a` — válido pero tonto, y una fila con la columna dos
+     veces. */
+  const sobran = [...new Set(extras)].filter(c => !puestas.has(c));
+  const todas = [...arbol.campos, ...sobran.map(c => ident(c, 'una clave de embebido'))];
+  return { sql: todas.join(', '), sobran };
+}
+
+/* Compatibilidad con el resto del módulo: la forma de siempre, sin embebidos. */
+function columnas(seleccion) {
+  const arbol = parsearSeleccion(seleccion);
+  if (arbol.embebidos.length) noSoportado('un `select` con JOIN embebido aquí');
+  return columnasDelPadre(arbol).sql;
 }
 
 /* ── El orden, que es donde los dos motores NO coinciden ─────────────────
@@ -194,6 +303,13 @@ function esIs(c, valor) {
    otro `not`: PostgREST no lo permite y no hay ninguno, así que es una puerta
    cerrada a propósito. */
 function condicion(f, params, profundidad = 0) {
+  /* `.gt('tipo.precio', 0)` filtra por una columna de la tabla embebida. En
+     PostgREST eso obliga a un `!inner`, y aquí a un JOIN de verdad: son los
+     mismos 2 usos del tramo 5b. Sin este mensaje saldría como «el nombre
+     `tipo.precio` no vale», que no dice qué falta. */
+  if (String(f.col).includes('.')) {
+    noSoportado(`filtrar por \`${f.col}\`, que es una columna de una tabla embebida`, '5b');
+  }
   const c = ident(f.col, `un \`${f.tipo}\``);
 
   switch (f.tipo) {
@@ -368,8 +484,27 @@ async function ejecutar(plan, { base = bd('datos') } = {}) {
          trabajo que nadie pidió, y son 44 de los 54 usos. */
       if (plan.soloContar) return { data: null, error: null, count: cuenta };
 
+      /* Con embebidos hay que saber por qué columna se va a buscar cada uno
+         ANTES de armar el SELECT del padre: si pidieron `custom_permissions,
+         rol_detail:…!rol_id(…)`, hace falta traer también `rol_id` aunque
+         nadie lo haya pedido — y borrarlo después, porque PostgREST no lo
+         devuelve. */
+      let resueltos = [];
+      if (plan.arbol.embebidos.length) {
+        resueltos = await resolverEmbebidos(plan.tabla, plan.arbol.embebidos, base);
+        const { sql: cols, sobran } = columnasDelPadre(
+          plan.arbol, resueltos.map(e => e.colPadre));
+        plan.columnas = cols;
+        plan.sobran = sobran;
+      }
+
       const { sql, params } = compilar(plan);
       filas = await base.consultar(sql, params);
+
+      if (resueltos.length) {
+        await adjuntarEmbebidos(filas, plan.tabla, plan.arbol.embebidos, base);
+        for (const fila of filas) for (const c of plan.sobran) delete fila[c];
+      }
     } else {
       const r = await escribir(plan, base);
       /* Sin `.select()` detrás, supabase-js devuelve `{ data: null }`. Devolver
@@ -417,6 +552,157 @@ async function ejecutar(plan, { base = bd('datos') } = {}) {
     }),
     count: null,
   };
+}
+
+/* ══ LOS EMBEBIDOS (tramo 5) ════════════════════════════════════════════
+ *
+ * 66 `select` traen una tabla relacionada dentro. Son la parte cara del
+ * adaptador y la que más daño hace si se hace mal, porque el modo de fallo es
+ * el de siempre: no revienta, devuelve otra cosa.
+ *
+ * ── Objeto o lista: la decisión que lo decide todo ───────────────────────
+ *
+ * PostgREST devuelve el embebido como **objeto** cuando la clave ajena está en
+ * la tabla de arriba (muchos-a-uno) y como **lista** cuando está en la de
+ * abajo (uno-a-muchos). No es un detalle de forma:
+ *
+ *     // lib/acceso.js — el guardia de las 378 rutas
+ *     .select('custom_permissions, rol_detail:event_roles!rol_id(permissions)')
+ *     const lista = [...(m.rol_detail?.permissions || []), …];
+ *
+ * Si `rol_detail` volviera como lista, `?.permissions` daría `undefined`, el
+ * `|| []` lo taparía, y **todo el mundo perdería los permisos de su rol sin un
+ * solo error en ningún log**. Por eso la dirección no se adivina por el nombre
+ * ni por si suena a plural: se lee de las claves ajenas del esquema.
+ *
+ * ── Por qué NO es un JOIN ────────────────────────────────────────────────
+ *
+ * Parecería que un embebido es un `LEFT JOIN`. Con muchos-a-uno casi, pero con
+ * uno-a-muchos un JOIN **multiplica las filas del padre** —tres hijos, tres
+ * copias del padre— y entonces el `LIMIT` deja de contar filas del padre y el
+ * `count` miente. Rearmarlo después es adivinar dónde empieza cada grupo.
+ *
+ * Así que se hace como lo hacen los ORM: una consulta para el padre y **una
+ * consulta más por cada embebido**, con un `IN (…)` de las claves que han
+ * salido. Dos o tres viajes en vez de uno, sin multiplicar nada y con el
+ * `LIMIT` y el `count` intactos. No es N+1: es 1 por embebido, no 1 por fila.
+ */
+
+/* Las claves ajenas entre dos tablas, preguntadas una vez y guardadas. */
+const _relaciones = new Map();
+
+async function relacionesEntre(padre, hijo, base) {
+  const clave = `${padre}|${hijo}`;
+  if (_relaciones.has(clave)) return _relaciones.get(clave);
+
+  const filas = await base.consultar(
+    `SELECT TABLE_NAME AS deTabla, COLUMN_NAME AS deCol,
+            REFERENCED_TABLE_NAME AS aTabla, REFERENCED_COLUMN_NAME AS aCol
+       FROM information_schema.KEY_COLUMN_USAGE
+      WHERE TABLE_SCHEMA = DATABASE()
+        AND REFERENCED_TABLE_NAME IS NOT NULL
+        AND ((TABLE_NAME = ? AND REFERENCED_TABLE_NAME = ?)
+          OR (TABLE_NAME = ? AND REFERENCED_TABLE_NAME = ?))`,
+    [padre, hijo, hijo, padre]);
+
+  _relaciones.set(clave, filas);
+  return filas;
+}
+
+/* Qué relación es, y por qué columnas va.
+ *
+ * `fk` es lo que viene tras el `!`. Puede nombrar la columna de arriba
+ * (`profiles!user_id` → `event_members.user_id`) o la de abajo. Se busca en
+ * las dos direcciones y se exige que quede UNA sola candidata: si hay dos
+ * caminos entre las mismas tablas y nadie dijo cuál, PostgREST también da
+ * error, y elegir el primero sería devolver los datos de otro. */
+async function resolverEmbebido(padre, emb, base) {
+  const filas = await relacionesEntre(padre, emb.tabla, base);
+
+  const candidatas = filas
+    .filter(r => emb.fk === null || r.deCol === emb.fk)
+    .map(r => (r.deTabla === padre
+      ? { tipo: 'uno',    colPadre: r.deCol, colHijo: r.aCol }
+      : { tipo: 'muchos', colPadre: r.aCol,  colHijo: r.deCol }));
+
+  if (!candidatas.length) {
+    noSoportado(`el embebido \`${emb.alias}\`: no hay clave ajena entre \`${padre}\` y ` +
+                `\`${emb.tabla}\`${emb.fk ? ` por \`${emb.fk}\`` : ''}`);
+  }
+  if (candidatas.length > 1) {
+    noSoportado(`el embebido \`${emb.alias}\`: hay ${candidatas.length} caminos entre ` +
+                `\`${padre}\` y \`${emb.tabla}\` y no se dijo cuál (pon \`!columna\`)`);
+  }
+  return { ...emb, ...candidatas[0] };
+}
+
+async function resolverEmbebidos(padre, embebidos, base) {
+  const salida = [];
+  for (const e of embebidos) {
+    if (e.inner) {
+      /* `!inner` descarta las filas del padre que no tengan hijo, y eso tiene
+         que pasar ANTES del `LIMIT` y del `count` o la página sale corta y el
+         total miente. Con la consulta aparte no se puede: hace falta un JOIN
+         de verdad en la consulta del padre. Son 2 usos de 66. */
+      noSoportado(`el embebido \`${e.alias}\` con \`!inner\``, '5b');
+    }
+    salida.push(await resolverEmbebido(padre, e, base));
+  }
+  return salida;
+}
+
+/* Trae cada embebido con UNA consulta y lo engancha a las filas del padre. */
+async function adjuntarEmbebidos(filas, padre, embebidos, base) {
+  if (!filas.length || !embebidos.length) return filas;
+
+  const resueltos = await resolverEmbebidos(padre, embebidos, base);
+
+  for (const emb of resueltos) {
+    const claves = [...new Set(filas.map(f => f[emb.colPadre]).filter(v => v != null))];
+
+    /* Sin claves no hay a quién ir a buscar, y una consulta con `IN ()` vacío
+       no tendría sentido. Se rellena igual: objeto → null, lista → []. Lo que
+       no puede quedar es el campo SIN PONER, porque entonces la diferencia
+       entre «no tiene» y «no se miró» desaparece. */
+    let porClave = new Map();
+    if (claves.length) {
+      const dentro = emb.seleccion;
+      /* Los NIETOS se resuelven antes de pedir al hijo, porque el hijo tiene
+         que traer también las claves por las que se irá a buscar a sus propios
+         embebidos. Sin esto, un anidado de tres niveles sale null en el
+         tercero: el hijo llega sin su `rol_id` y no hay por dónde buscar.
+         Lo cazó la prueba de los anidados. */
+      const nietos = await resolverEmbebidos(emb.tabla, dentro.embebidos, base);
+      const { sql: cols, sobran } = columnasDelPadre(
+        dentro, [emb.colHijo, ...nietos.map(n => n.colPadre)]);
+      const hijas = await base.consultar(
+        `SELECT ${cols} FROM ${ident(emb.tabla, 'un embebido')} ` +
+        `WHERE ${ident(emb.colHijo, 'un embebido')} IN (${claves.map(() => '?').join(', ')})`,
+        claves);
+
+      /* Los anidados: el hijo puede traer su propio hijo. */
+      await adjuntarEmbebidos(hijas, emb.tabla, dentro.embebidos, base);
+
+      /* El mapa SE ARMA ANTES de limpiar. La columna por la que se empareja
+         suele ser una de las que sobran —nadie pide `id` para pedir el rol—,
+         así que borrarla primero deja la clave en `undefined` y el embebido
+         sale null para todo el mundo. Lo cazaron estas pruebas. */
+      for (const h of hijas) {
+        const k = h[emb.colHijo];
+        if (emb.tipo === 'uno') porClave.set(k, h);
+        else { if (!porClave.has(k)) porClave.set(k, []); porClave.get(k).push(h); }
+      }
+      for (const h of hijas) for (const c of sobran) delete h[c];
+    }
+
+    for (const f of filas) {
+      const k = f[emb.colPadre];
+      f[emb.alias] = emb.tipo === 'uno'
+        ? (porClave.get(k) ?? null)
+        : (porClave.get(k) ?? []);
+    }
+  }
+  return filas;
 }
 
 /* ══ ESCRITURAS (tramo 3) ═══════════════════════════════════════════════
@@ -753,6 +1039,8 @@ function constructor(tabla, opciones = {}) {
     tabla,
     accion  : 'select',
     columnas: '*',
+    arbol   : { campos: ['*'], embebidos: [] },
+    sobran  : [],      // columnas añadidas para buscar los embebidos
     filtros : [],
     orden   : [],
     limite  : null,
@@ -785,7 +1073,11 @@ function constructor(tabla, opciones = {}) {
       } else if (extra && extra.head) {
         noSoportado('`head` sin `count` (no devolvería ni filas ni cuenta)');
       }
-      plan.columnas = columnas(seleccion);
+      plan.arbol = parsearSeleccion(seleccion);
+      /* Con embebidos, las columnas del padre no se saben hasta conocer las
+         claves ajenas —y eso es una consulta—, así que se dejan para
+         `ejecutar`. `compilar` sigue siendo pura. */
+      if (!plan.arbol.embebidos.length) plan.columnas = columnasDelPadre(plan.arbol).sql;
       /* Detrás de una escritura, `.select()` no elige qué leer: pide que la
          escritura DEVUELVA lo escrito. En Postgres es el `RETURNING`; aquí
          obliga a transacción y relectura (ver «ESCRITURAS» arriba). */

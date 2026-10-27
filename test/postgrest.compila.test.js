@@ -145,12 +145,10 @@ test('un método que no existe lanza y dice cuál era', () => {
    Que una prueba así falle al implementar el tramo siguiente es la señal buena:
    decía la verdad sobre el estado anterior y avisa de que ha cambiado. */
 
-test('los JOIN embebidos lanzan y mandan al tramo 5', () => {
-  /* Son 66, y uno lo usa `lib/acceso.js`, el guardia de las 378 rutas. Si esto
-     se colara, el paréntesis acabaría dentro de un nombre de columna y MySQL
-     daría un error de sintaxis que no explicaría nada. */
-  lanza(() => pg.from('posts').select('*, autor:profiles!autor_id(id, nombre)'), /tramo 5/);
-});
+/* Aquí había una prueba de que los JOIN embebidos lanzaban. El tramo 5 los
+   implementó; se prueban en `postgrest.embebidos.test.js`, empezando por el de
+   `lib/acceso.js` —el guardia de las 378 rutas—, que es el que más daño haría
+   si volviera como lista en vez de como objeto. */
 
 /* Aquí había una prueba de que `count` lanzaba y mandaba al tramo 4. Ese
    tramo lo implementó; contar y paginar se prueban en

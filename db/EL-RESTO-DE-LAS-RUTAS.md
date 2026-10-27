@@ -161,7 +161,8 @@ Cada tramo deja algo que se puede probar solo, y ninguno cambia nada mientras
 | 2 | El resto de filtros: `in`, `is`, `neq`, `not`, `gt/gte/lt/lte`, `ilike` (`match`: cero usos) | Idem, caso por caso | ✅ |
 | 3 | Escrituras: `insert`, `update`, `delete`, `upsert` — y el `JSON.stringify` de las 8 columnas de array | Idem | ✅ |
 | 4 | `count` y `range`, con la semántica escrita | Comparando contra Postgres | ✅ |
-| 5 | **Los 66 JOIN embebidos** | Empezando por el de `lib/acceso.js`, con la prueba de permisos en verde | ⬜ |
+| 5 | **Los 66 JOIN embebidos** | Empezando por el de `lib/acceso.js`, con la prueba de permisos en verde | ✅ 64/66 |
+| 5b | `!inner` y filtrar por columna embebida | Los 2 que faltan | ⬜ |
 | 6 | `.or()` y su gramática | Las cinco formas que hay hoy | ⬜ |
 | 7 | Las 12 `.rpc()` que faltan | Una por una | ⬜ |
 | 8 | La comparación final: las mismas consultas contra los dos motores | `scripts/comparar-bases.js` ampliado | ⬜ |
@@ -380,6 +381,60 @@ lista», no como un fallo.
 | `range` y `limit` a la vez | Uno pisaría al otro y no está dicho cuál. Cero usos. |
 | un `range` al revés o negativo | |
 | `count` detrás de una escritura | Contar qué, y respecto a qué. Cero usos. |
+
+---
+
+## 9 · Tramo 5 — los embebidos
+
+64 de los 66. Los otros 2 —los que llevan `!inner`— van en el 5b.
+
+### Objeto o lista: la decisión que lo decide todo
+
+PostgREST devuelve el embebido como **objeto** cuando la clave ajena está en la
+tabla de arriba (muchos-a-uno) y como **lista** cuando está en la de abajo
+(uno-a-muchos). No es un detalle de forma:
+
+```js
+// lib/acceso.js — el guardia de las 378 rutas
+.select('custom_permissions, rol_detail:event_roles!rol_id(permissions)')
+const lista = [...(m.rol_detail?.permissions || []), ...];
+```
+
+Si `rol_detail` volviera como lista, `?.permissions` daría `undefined`, el
+`|| []` lo taparía, y **todo el mundo perdería los permisos de su rol sin un
+solo error en ningún log**.
+
+Por eso la dirección **no se adivina** por el nombre ni por si suena a plural:
+se lee de las claves ajenas del esquema (`information_schema`), una vez por par
+de tablas y guardada.
+
+### Por qué NO es un JOIN
+
+Parecería que un embebido es un `LEFT JOIN`. Con muchos-a-uno casi; con
+uno-a-muchos **un JOIN multiplica las filas del padre** —tres hijos, tres
+copias— y entonces el `LIMIT` deja de contar filas del padre y el `count`
+miente. Rearmarlo después es adivinar dónde empieza cada grupo.
+
+Así que se hace como lo hacen los ORM: una consulta para el padre y **una más
+por cada embebido**, con un `IN (…)` de las claves que salieron.
+
+> **No es N+1:** es una consulta por embebido, no una por fila. Hay una prueba
+> que lo cuenta y falla si se convierte en N+1.
+
+### Con dos caminos, lanza
+
+Si hay dos claves ajenas entre las mismas tablas —`autor_id` y `revisor_id`,
+por ejemplo— y nadie dijo cuál, **lanza**. Coger la primera sería devolver los
+datos de otra persona: el revisor donde se pedía el autor.
+
+### Dos fallos que encontraron las propias pruebas
+
+1. **Se borraba la columna de emparejamiento antes de usarla.** El embebido
+   salía `null` para todo el mundo — incluido el guardia.
+2. **Los anidados no traían la clave del nieto.** El tercer nivel salía `null`.
+
+Los dos son exactamente el fallo que este adaptador existe para evitar: sin
+error, con la respuesta a medias.
 
 ### Lo que NO está cableado todavía
 
