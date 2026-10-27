@@ -485,7 +485,7 @@ que el §4 tenga sentido. Al 27 de octubre:
 | Sumas atómicas de lo vendido en `modules/contadores/` | ✅ hecho |
 | Semillas de evento (roles, canales) en `modules/eventos/semillas.js` | ✅ hecho |
 | Lo vendido: las 13 llamadas pasan por `lib/contadores.js` y obedecen a `DATOS_PROPIOS` | ✅ hecho |
-| **Cablear el RESTO de las rutas a MySQL** (los 43 archivos que usan Supabase directo) | ⬜ **falta** |
+| **Cablear el RESTO de las rutas a MySQL** — 1.152 llamadas en 95 archivos, medido. El frente y los dos caminos, en `EL-RESTO-DE-LAS-RUTAS.md` | ⬜ **falta** |
 | Las 8 columnas `ARRAY` → `JSON` | ✅ hecho — resultó ser una sola consulta; ver NOTAS-ESQUEMA |
 | Los 5 uploaders del frontend, que hoy suben directo a Supabase | ⬜ falta (va con el §7) |
 
@@ -496,5 +496,8 @@ JSON como array de JS), escribirlas pide `JSON.stringify` y falla ruidoso si
 se olvida, y consultarlas con operadores de Postgres había **una sola vez** en
 todo el código. El detalle, en `migraciones/NOTAS-ESQUEMA.md`.
 
-Así que lo único grande que queda de verdad es **el resto de las rutas**: los
-43 archivos que hablan con Supabase directo.
+Así que lo único grande que queda de verdad es **el resto de las rutas**.
+Medido el 27-oct: **1.152 llamadas en 95 archivos sobre 86 tablas**, no los 43
+archivos que decía esta tabla —ése era el número de archivos que *mencionan*
+supabase, no los que consultan—. El frente entero, los dos caminos posibles y
+la recomendación están en [`EL-RESTO-DE-LAS-RUTAS.md`](EL-RESTO-DE-LAS-RUTAS.md).
