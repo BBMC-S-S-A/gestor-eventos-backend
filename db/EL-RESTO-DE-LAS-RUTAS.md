@@ -97,7 +97,7 @@ conocemos — una consulta mal traducida no revienta, devuelve de más o de
 menos. Encima no se puede hacer a medias: `DATOS_PROPIOS` enciende todo a la
 vez, así que hasta la última de las 1.152 no se puede probar nada de verdad.
 
-### Camino B · Un adaptador que hable el mismo idioma ← **recomendado**
+### Camino B · Un adaptador que hable el mismo idioma ← **ELEGIDO**
 
 Implementar el subconjunto medido arriba sobre MySQL, y que `lib/supabase.js`
 devuelva el cliente de verdad o el adaptador según `DATOS_PROPIOS`:
@@ -149,28 +149,88 @@ con MySQL el día que se mueva la bandera.
 Cada tramo deja algo que se puede probar solo, y ninguno cambia nada mientras
 `DATOS_PROPIOS` siga apagada.
 
-| # | Qué | Cómo se comprueba |
-|---|---|---|
-| 1 | El esqueleto: `from`, `select` de columnas, `eq`, `order`, `limit`, `single`/`maybeSingle`, y el **reventar** ante lo no soportado | Contra MySQL real, tabla por tabla |
-| 2 | El resto de filtros: `in`, `is`, `neq`, `not`, `gt/gte/lt/lte`, `ilike`, `match` | Idem, caso por caso |
-| 3 | Escrituras: `insert`, `update`, `delete`, `upsert` — y el `JSON.stringify` de las 8 columnas de array | Idem |
-| 4 | `count` y `range`, con la semántica escrita | Comparando contra Postgres |
-| 5 | **Los 66 JOIN embebidos** | Empezando por el de `lib/acceso.js`, con la prueba de permisos en verde |
-| 6 | `.or()` y su gramática | Las cinco formas que hay hoy |
-| 7 | Las 12 `.rpc()` que faltan | Una por una |
-| 8 | La comparación final: las mismas consultas contra los dos motores | `scripts/comparar-bases.js` ampliado |
+| # | Qué | Cómo se comprueba | |
+|---|---|---|---|
+| 1 | El esqueleto: `from`, `select` de columnas, `eq`, `order`, `limit`, `single`/`maybeSingle`, y el **reventar** ante lo no soportado | Contra MySQL real, tabla por tabla | ✅ |
+| 2 | El resto de filtros: `in`, `is`, `neq`, `not`, `gt/gte/lt/lte`, `ilike`, `match` | Idem, caso por caso | ⬜ |
+| 3 | Escrituras: `insert`, `update`, `delete`, `upsert` — y el `JSON.stringify` de las 8 columnas de array | Idem | ⬜ |
+| 4 | `count` y `range`, con la semántica escrita | Comparando contra Postgres | ⬜ |
+| 5 | **Los 66 JOIN embebidos** | Empezando por el de `lib/acceso.js`, con la prueba de permisos en verde | ⬜ |
+| 6 | `.or()` y su gramática | Las cinco formas que hay hoy | ⬜ |
+| 7 | Las 12 `.rpc()` que faltan | Una por una | ⬜ |
+| 8 | La comparación final: las mismas consultas contra los dos motores | `scripts/comparar-bases.js` ampliado | ⬜ |
 
 ---
 
 ## 4 · Lo que hay que decidir antes de empezar
 
-1. **¿A o B?** Lo de arriba recomienda B, y la razón de fondo es que 1.152
-   ediciones a mano en un sistema cuyo modo de fallo es el silencio no es un
-   plan: es una apuesta.
+1. ~~**¿A o B?**~~ **DECIDIDO: B**, el 27 de octubre de 2026. La razón de
+   fondo es que 1.152 ediciones a mano en un sistema cuyo modo de fallo es el
+   silencio no es un plan: es una apuesta.
 2. **¿Qué se hace con `generar_recordatorios_inapp`?** Está rota desde hace
    tiempo —lee una tabla que ya no existe— y lo que corresponde es borrarla.
    El `drop` está escrito en el comentario de la `0139`.
 3. **El cotejo.** `utf8mb4_0900_as_ci` es acento-SENSIBLE: «Bogota» no casa
    con «Bogotá», y en Postgres con `ilike` tampoco. Parece que coinciden, pero
    conviene comprobarlo con datos reales antes de dar por buena la búsqueda
-   del mostrador.
+   del mostrador. Entra en el tramo 2, con `ilike`.
+
+---
+
+## 5 · Lo que lleva hecho el adaptador
+
+**`core/db/postgrest.js`** — tramo 1, escrito el 27 de octubre de 2026.
+
+Cubre `from`, `select` de columnas, `eq` (incluido `eq(col, null)` → `IS NULL`),
+`order`, `limit`, `single` y `maybeSingle`. Todo lo demás **lanza**, con un
+mensaje que dice a qué tramo pertenece.
+
+### Las tres decisiones que no se ven en la firma
+
+**1 · Lo no soportado LANZA, no devuelve `{ error }`.** Muchas de las 1.152
+están escritas `const { data } = await …`, tirando el error. Un error devuelto
+sería una lista vacía en silencio, que es el modo de fallo que el adaptador
+existe para evitar. Los errores de SQL de verdad SÍ vuelven como `{ error }`,
+porque es lo que hace supabase-js hoy.
+
+**2 · El orden de los NULL.** Es la trampa fina, y no da error: ordena, y
+ordena distinto. Medido el 27-oct con una tabla de tres filas, una con la
+fecha a NULL:
+
+| | ASC | DESC |
+|---|---|---|
+| Postgres 17.6 (Supabase, producción) | `1,3,2` | `2,3,1` |
+| MySQL 8.0.46 a pelo | `2,1,3` ❌ | `3,1,2` ❌ |
+| MySQL con el adaptador | `1,3,2` ✅ | `2,3,1` ✅ |
+
+Está cambiado **en los dos sentidos**. Se arregla ordenando primero por
+`(col IS NULL)`. Sin eso, cualquier lista ordenada por una columna que admita
+NULL sale con los sin-valor donde no van — y nadie lo reporta como fallo.
+
+**3 · `single()` pide `LIMIT 2`.** No es optimización: tiene que distinguir
+«una» de «más de una», y con dos filas ya se sabe. Si quien llama puso su
+propio `limit`, manda el suyo.
+
+### Cómo se prueba
+
+| Archivo | Qué | Corre |
+|---|---|---|
+| `test/postgrest.compila.test.js` | el SQL que se genera (`compilar()` es pura) | siempre, también en el CI |
+| `test/postgrest.contraMysql.test.js` | que ese SQL hace lo que se cree | `MYSQL_PRUEBAS=1 npm test` |
+
+La parte de integración está tras bandera porque el CI no tiene MySQL, y una
+prueba que falla todos los días acaba borrada. Levanta su propia base, la llena
+y la borra; no toca ninguna del proyecto.
+
+### Lo que NO está cableado todavía
+
+`lib/supabase.js` **sigue devolviendo el cliente de Supabase siempre.** El
+cambio de la cabecera de este documento —
+
+```js
+module.exports = config.DATOS_PROPIOS ? require('../core/db/postgrest.js') : clienteSupabase;
+```
+
+— se hace al final, cuando los ocho tramos estén. Cablearlo ahora no rompería
+nada (la bandera está apagada), pero dejaría escrito que el adaptador está
+listo cuando le faltan siete tramos.
