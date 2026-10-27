@@ -484,7 +484,8 @@ que el §4 tenga sentido. Al 27 de octubre:
 | Esquema MySQL al día hasta la 0138 (`008`) | ✅ hecho |
 | Sumas atómicas de lo vendido en `modules/contadores/` | ✅ hecho |
 | Semillas de evento (roles, canales) en `modules/eventos/semillas.js` | ✅ hecho |
-| **Cablear las rutas a MySQL en vez de a `supabase.rpc`** | ⬜ **falta** |
+| Lo vendido: las 13 llamadas pasan por `lib/contadores.js` y obedecen a `DATOS_PROPIOS` | ✅ hecho |
+| **Cablear el RESTO de las rutas a MySQL** (los 43 archivos que usan Supabase directo) | ⬜ **falta** |
 | **Las 8 columnas `ARRAY` → `JSON`**: lo que hoy se consulta con `@>` o `= ANY()` hay que reescribirlo con `JSON_CONTAINS` / `MEMBER OF` | ⬜ **falta** |
 | Los 5 uploaders del frontend, que hoy suben directo a Supabase | ⬜ falta (va con el §7) |
 

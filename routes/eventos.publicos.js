@@ -1,6 +1,7 @@
 const express = require('express');
 const crypto = require('crypto');
 const supabase = require('../lib/supabase.js');
+const contadores = require('../lib/contadores.js');
 const { precioDeCompra, consumirPromocion } = require('../lib/precioTicket.js');
 const { enlaceBoleta } = require('../lib/enlacePublico.js');
 const { ocupacion, zonasDelEvento, agendaPorZona } = require('../lib/aforoZonas.js');
@@ -2308,7 +2309,7 @@ router.post('/slug/:slug/reservar', async (req, res) => {
   /* El camino de MÁS concurrencia que hay: es el botón de registro de la
      página pública, y en un festival se pulsa doscientas veces en una hora.
      Leyendo y escribiendo desde aquí se perdían ventas simultáneas. Ver 0138. */
-  await supabase.rpc('sumar_vendidos_tipo', { p_tipo: tipo.id, p_delta: 1 });
+  await contadores.sumarVendidosTipo(tipo.id, 1);
 
   if (esGratis) {
     /* Sale ya pagada, así que el uso del código se cuenta aquí: esta boleta no
@@ -2334,7 +2335,7 @@ router.post('/slug/:slug/reservar', async (req, res) => {
      * mira variables no declaradas, y la rama sólo corre en un registro
      * gratuito real. Lo cazó alguien intentando registrarse. */
     const personas = await personasDeEspacio(silla.espacioId);
-    await supabase.rpc('sumar_aforo_vendido', { p_evento: evento.id, p_delta: personas });
+    await contadores.sumarAforoVendido(evento.id, personas);
 
     /* Y sus puestos (0118), por lo mismo que el aforo: una mesa de cuatro tiene
        que llegar a la puerta con cuatro sitios que marcar. Este camino no pasa
