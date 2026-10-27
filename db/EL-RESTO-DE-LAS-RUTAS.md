@@ -163,7 +163,7 @@ Cada tramo deja algo que se puede probar solo, y ninguno cambia nada mientras
 | 4 | `count` y `range`, con la semántica escrita | Comparando contra Postgres | ✅ |
 | 5 | **Los 66 JOIN embebidos** | Empezando por el de `lib/acceso.js`, con la prueba de permisos en verde | ✅ |
 | 5b | `!inner` y filtrar por columna embebida | Los 2 que faltaban | ✅ |
-| 6 | `.or()` y su gramática | Las cinco formas que hay hoy | ⬜ |
+| 6 | `.or()` y su gramática | Las cinco formas que hay hoy | ✅ |
 | 7 | Las 12 `.rpc()` que faltan | Una por una | ⬜ |
 | 8 | La comparación final: las mismas consultas contra los dos motores | `scripts/comparar-bases.js` ampliado | ⬜ |
 
@@ -480,6 +480,64 @@ sería el del rol.
 |---|---|
 | filtrar por una columna embebida **sin** `!inner` | PostgREST también lo exige: sin el `!inner` no hay nada que filtrar. |
 | `!inner` hacia **uno-a-muchos** | Multiplicaría las filas del padre —tres hijos, tres copias— y el `LIMIT` dejaría de contar filas del padre. PostgREST lo resuelve con un lateral; aquí haría falta un `EXISTS`, que es otra cosa y nadie la ha pedido. Los dos `!inner` del código son muchos-a-uno. |
+
+---
+
+## 11 · Tramo 6 — `.or()` y su gramática
+
+28 usos. PostgREST se inventa aquí un idioma propio **dentro de una cadena**.
+Las cinco formas que hay en el código, copiadas de donde viven:
+
+```
+user_id.eq.abc,guest_email.eq.ana@x.com                        tickets
+fecha_fin.is.null,fecha_fin.gte.2026-10-27                     vacantes
+created_at.lt.X,and(created_at.eq.X,id.lt.Y)                   clientes (cursor)
+owner_id.eq.abc,id.in.(a,b,c)                                  eventos
+and(a_id.eq.1,b_id.eq.2),and(a_id.eq.2,b_id.eq.1)              torneos
+```
+
+### Los paréntesis, que es lo que no se ve
+
+En SQL, `a = 1 AND b = 2 OR c = 3` se lee **`(a AND b) OR c`**. Si el `or` no
+se envuelve, una consulta que combine `.eq()` con `.or()` —el patrón de
+«buscar dentro de MI evento»— devuelve **las filas de otros dueños** que casen
+con la búsqueda.
+
+Sin error. Es el fallo de este proyecto en su forma más cara: datos de otro en
+pantalla.
+
+### Las comas no son todas iguales
+
+Hay comas que separan condiciones y comas que están dentro de un `and(…)`, de
+un `in.(…)` o de un valor entrecomillado. Un `split(',')` parte
+`id.in.(a,b,c)` en tres trozos.
+
+> El separador ya existía para los embebidos; el tramo 6 le añadió respetar las
+> comillas. **Lo cazó una prueba**: `nombre.eq."Pérez, Juan"` se partía por la
+> coma de dentro.
+
+### Lo que esto NO arregla, porque no es suyo
+
+Estas cadenas se arman interpolando (`ilike.%${q}%`). Si lo que teclea el
+usuario lleva una coma, la condición se parte mal — **y eso pasa ya hoy contra
+PostgREST**, que hace el mismo análisis. No es una regresión del adaptador, y
+arreglarlo aquí dejaría los dos motores comportándose distinto.
+
+La solución es entrecomillar el valor (`ilike."%a,b%"`) **en el sitio que
+construye la cadena**. El adaptador sí sabe leer las comillas, para que ese
+arreglo no necesite tocarlo.
+
+### Lo que lanza a propósito
+
+| | |
+|---|---|
+| una condición que no tenga la forma `columna.operador.valor` | |
+| un operador que no existe | pasarlo como `eq` devolvería otra cosa |
+| `like` dentro de un `or` | lo mismo que fuera: en MySQL con cotejo `_ci` no distingue mayúsculas |
+| paréntesis o comillas descuadrados | |
+| un `and()` vacío | |
+| `or` sobre una tabla relacionada | |
+| un `in` sin paréntesis | |
 
 ### Lo que NO está cableado todavía
 

@@ -138,14 +138,30 @@ function cualificar(col, ctx, de) {
    y el error saldría como un nombre de columna raro, tres pasos más allá. */
 function porComasDeArriba(texto) {
   const partes = [];
-  let prof = 0, actual = '';
+  let prof = 0, comillas = false, escapando = false, actual = '';
+
   for (const c of texto) {
-    if (c === '(') prof++;
-    else if (c === ')') prof--;
-    if (c === ',' && prof === 0) { partes.push(actual); actual = ''; continue; }
+    if (escapando) { actual += c; escapando = false; continue; }
+
+    /* Las comillas importan por el `or` del tramo 6, no por el `select`: es la
+       forma que tiene PostgREST de meter una coma DENTRO de un valor
+       (`nombre.eq."Pérez, Juan"`). Sin esto, esa coma partiría la condición en
+       dos y la segunda mitad ni siquiera parecería una condición. Lo cazó la
+       prueba del valor entrecomillado. En un `select` no hay comillas, así que
+       esto no le cambia nada. */
+    if (c === '\\' && comillas) { actual += c; escapando = true; continue; }
+    if (c === '"') comillas = !comillas;
+    else if (!comillas) {
+      if (c === '(') prof++;
+      else if (c === ')') prof--;
+      if (c === ',' && prof === 0) { partes.push(actual); actual = ''; continue; }
+    }
     actual += c;
   }
-  if (prof !== 0) noSoportado(`un \`select\` con los paréntesis descuadrados: \`${texto.trim()}\``);
+
+  if (prof !== 0 || comillas) {
+    noSoportado(`los paréntesis o las comillas están descuadrados: \`${texto.trim()}\``);
+  }
   partes.push(actual);
   return partes.map(p => p.trim()).filter(Boolean);
 }
@@ -342,6 +358,16 @@ function esIs(c, valor) {
    otro `not`: PostgREST no lo permite y no hay ninguno, así que es una puerta
    cerrada a propósito. */
 function condicion(f, params, ctx = null, profundidad = 0) {
+  /* Los grupos del tramo 6: `or` y `and` con hijos dentro. Van antes de
+     cualificar porque no tienen columna propia.
+     El paréntesis NO es de adorno: `a = 1 AND b = 2 OR c = 3` se lee
+     `(a AND b) OR c` en SQL, así que sin él un `.or()` combinado con otros
+     filtros devolvería filas de más — en silencio, que es lo de siempre. */
+  if (f.tipo === 'or' || f.tipo === 'and') {
+    const union = f.tipo === 'or' ? ' OR ' : ' AND ';
+    return `(${f.hijos.map(h => condicion(h, params, ctx, profundidad)).join(union)})`;
+  }
+
   const c = cualificar(f.col, ctx, `un \`${f.tipo}\``);
 
   switch (f.tipo) {
@@ -621,6 +647,123 @@ async function ejecutar(plan, { base = bd('datos') } = {}) {
     }),
     count: null,
   };
+}
+
+/* ══ `.or()` Y SU GRAMÁTICA (tramo 6) ═══════════════════════════════════
+ *
+ * 28 usos, y PostgREST se inventa aquí un idioma propio dentro de una cadena:
+ *
+ *     'user_id.eq.abc,guest_email.eq.ana@x.com'
+ *     'fecha_fin.is.null,fecha_fin.gte.2026-10-27'
+ *     'created_at.lt.X,and(created_at.eq.X,id.lt.Y)'        ← anidado
+ *     'owner_id.eq.abc,id.in.(a,b,c)'                        ← lista
+ *     'and(equipo_a_id.eq.1,equipo_b_id.eq.2),and(equipo_a_id.eq.2,equipo_b_id.eq.1)'
+ *
+ * Las cinco formas que hay, medidas el 27 de octubre de 2026.
+ *
+ * ── La trampa: las comas no son todas iguales ────────────────────────────
+ *
+ * Hay comas que separan condiciones y comas que están DENTRO de un `and(…)` o
+ * de un `in.(…)`. Un `split(',')` parte `id.in.(a,b,c)` en tres trozos y los
+ * dos últimos ni siquiera parecen condiciones — el error saldría como «la
+ * condición `b` no tiene la forma col.op.valor», que no dice nada de la lista.
+ *
+ * ── Lo que esto NO arregla, porque no es suyo ────────────────────────────
+ *
+ * Estas cadenas se arman interpolando (`ilike.%${q}%`). Si lo que escribe el
+ * usuario lleva una coma o un paréntesis, la condición se parte mal — y eso
+ * pasa YA HOY contra PostgREST, que hace exactamente el mismo análisis. No es
+ * una regresión del adaptador y tampoco es suyo arreglarlo: hacerlo aquí
+ * dejaría los dos motores comportándose distinto, que es justo lo que no
+ * queremos. Queda dicho para quien venga: la solución es entrecomillar el
+ * valor (`ilike."%a,b%"`), y se entrecomilla en el sitio que construye la
+ * cadena, no aquí.
+ *
+ * Lo que sí se hace es LEER las comillas si vienen, porque PostgREST también.
+ */
+
+/* Las operaciones que PostgREST escribe dentro de un `or`. Son los mismos
+   filtros del tramo 2, con sus mismos lanzados: `like` no entra. */
+const OPS_OR = new Set(['eq', 'neq', 'gt', 'gte', 'lt', 'lte', 'is', 'in', 'ilike', 'like']);
+
+/* El valor de una condición, tal y como lo escribe PostgREST.
+ *
+ * `is` es el único donde el texto no es el valor: `is.null` quiere decir NULL,
+ * no la cadena «null». Fuera de `is`, `eq.null` casaría con la cadena «null»
+ * —en PostgREST también—, así que se deja tal cual y no se adivina. */
+function valorOr(op, crudo) {
+  let v = crudo;
+  if (v.length >= 2 && v.startsWith('"') && v.endsWith('"')) v = v.slice(1, -1);
+
+  if (op === 'is') {
+    if (v === 'null')  return null;
+    if (v === 'true')  return true;
+    if (v === 'false') return false;
+    noSoportado(`\`is.${crudo}\` dentro de un \`or\`: PostgREST sólo admite null, true o false`);
+  }
+
+  if (op === 'in') {
+    if (!v.startsWith('(') || !v.endsWith(')')) {
+      noSoportado(`\`in.${crudo}\` dentro de un \`or\`: la lista va entre paréntesis`);
+    }
+    const dentro = v.slice(1, -1).trim();
+    /* `in.()` — la lista vacía. Como en el tramo 2: cero filas, sin error. */
+    if (!dentro) return [];
+    return porComasDeArriba(dentro).map(x =>
+      (x.length >= 2 && x.startsWith('"') && x.endsWith('"') ? x.slice(1, -1) : x));
+  }
+
+  return v;
+}
+
+/* Una condición suelta: `col.op.valor`, o un grupo `and(…)` / `or(…)`. */
+function condicionOr(texto, nivel = 0) {
+  if (nivel > 4) noSoportado('un `or` anidado más de cuatro niveles');
+  const t = texto.trim();
+
+  for (const grupo of ['and', 'or']) {
+    if (t.startsWith(`${grupo}(`) && t.endsWith(')')) {
+      const hijos = porComasDeArriba(t.slice(grupo.length + 1, -1))
+        .map(h => condicionOr(h, nivel + 1));
+      if (!hijos.length) noSoportado(`un \`${grupo}()\` vacío dentro de un \`or\``);
+      return { tipo: grupo, hijos };
+    }
+  }
+
+  /* `not.op.valor` — PostgREST lo admite. Cero usos medidos dentro de un `or`,
+     pero es una línea y el tramo 2 ya sabe hacer el NOT. */
+  if (t.startsWith('not.')) {
+    const dentro = condicionOr(t.slice(4), nivel + 1);
+    if (dentro.tipo === 'and' || dentro.tipo === 'or') {
+      noSoportado('un `not` sobre un grupo dentro de un `or`');
+    }
+    return { tipo: 'not', col: dentro.col, op: dentro.tipo, valor: dentro.valor };
+  }
+
+  /* `col.op.valor`, partido por los DOS primeros puntos: el valor puede llevar
+     puntos dentro —una fecha, un correo— y partir por todos lo destrozaría. */
+  const p1 = t.indexOf('.');
+  const p2 = p1 === -1 ? -1 : t.indexOf('.', p1 + 1);
+  if (p1 === -1 || p2 === -1) {
+    noSoportado(`la condición \`${t}\` dentro de un \`or\`: se esperaba \`columna.operador.valor\``);
+  }
+
+  const col = t.slice(0, p1);
+  const op  = t.slice(p1 + 1, p2);
+  if (!OPS_OR.has(op)) noSoportado(`el operador \`${op}\` dentro de un \`or\``);
+  if (op === 'like') {
+    noSoportado('`like` dentro de un `or` (sensible a mayúsculas: en MySQL con cotejo `_ci` NO lo sería; usa `ilike`)');
+  }
+
+  return { tipo: op, col, valor: valorOr(op, t.slice(p2 + 1)) };
+}
+
+/* La cadena entera de un `.or(…)`: condiciones separadas por comas de arriba,
+   unidas con OR. */
+function parsearOr(texto) {
+  const partes = porComasDeArriba(String(texto ?? ''));
+  if (!partes.length) noSoportado('un `or` vacío');
+  return { tipo: 'or', hijos: partes.map(p => condicionOr(p)) };
 }
 
 /* ══ LOS EMBEBIDOS (tramo 5) ════════════════════════════════════════════
@@ -1212,6 +1355,17 @@ function constructor(tabla, opciones = {}) {
 
     not(col, op, valor) {
       plan.filtros.push({ tipo: 'not', col, op, valor });
+      return envuelto;
+    },
+
+    /* `.or('a.eq.1,b.eq.2')` — 28 usos. La gramática está arriba, en «`.or()`
+       Y SU GRAMÁTICA». Se analiza aquí y no al compilar para que una cadena
+       mal escrita salte en la línea que la escribió. */
+    or(texto, opts = {}) {
+      if (opts.referencedTable || opts.foreignTable) {
+        noSoportado('`or` sobre una tabla relacionada', 5);
+      }
+      plan.filtros.push(parsearOr(texto));
       return envuelto;
     },
 

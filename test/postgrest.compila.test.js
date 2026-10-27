@@ -129,11 +129,13 @@ test('un método que no existe lanza y dice cuál era', () => {
      «falta implementarlo» y «está mal escrito».
 
      Esta lista se va vaciando sola: `ilike`, `in` e `is` salieron en el tramo
-     2 y `range` en el tramo 4. Sus pruebas viven en `postgrest.filtros.test.js`
-     y `postgrest.contar.test.js`; aquí quedan los que de verdad siguen sin
-     soporte. */
-  lanza(() => pg.from('t').select('*').or('a.eq.1,b.eq.2'), /\.or\(\)/);
+     2, `range` en el 4 y `or` en el 6. Sus pruebas viven en
+     `postgrest.filtros.test.js`, `postgrest.contar.test.js` y
+     `postgrest.or.test.js`; aquí quedan los que de verdad siguen sin soporte,
+     que ya son sólo los operadores de array de Postgres y la búsqueda de
+     texto. */
   lanza(() => pg.from('t').select('*').contains('zonas', ['vip']), /\.contains\(\)/);
+  lanza(() => pg.from('t').select('*').containedBy('zonas', ['vip']), /\.containedBy\(\)/);
   lanza(() => pg.from('t').select('*').overlaps('zonas', ['vip']), /\.overlaps\(\)/);
   lanza(() => pg.from('t').select('*').textSearch('nombre', 'ana'), /\.textSearch\(\)/);
 });
