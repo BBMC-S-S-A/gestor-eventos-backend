@@ -36,7 +36,7 @@ se llaman igual:
 | `.order()` | 225 | `.upsert()` | 13 |
 | `.single()` | 136 | | |
 | `.limit()` | 82 | **Contar** | |
-| `.is()` | 65 | `count: 'exact'` | 53 |
+| `.is()` | 65 | `count: 'exact'` | **54** (44 con `head`) |
 | `.or()` | 28 | | |
 | `.ilike()` | 28 | **Funciones** | |
 | `.not()` | 22 | `.rpc()` distintas | 12 |
@@ -134,7 +134,8 @@ con MySQL el día que se mueva la bandera.
 - Hay semántica fina que hay que decidir y escribir: dónde ordena los NULL
   cada motor, si `ilike` casa igual con el cotejo `utf8mb4_0900_as_ci`
   (acento-sensible, mayúscula-insensible), y si `count` cuenta antes o después
-  del `limit`.
+  del `limit`. **Las dos, resueltas:** el cotejo en el tramo 2 y el `count` en
+  el tramo 4.
 - `.or()` trae su propia gramática (`and(a.eq.1,b.eq.2)`) y hay que
   interpretarla. Son 28 usos, con cinco formas distintas.
 
@@ -159,7 +160,7 @@ Cada tramo deja algo que se puede probar solo, y ninguno cambia nada mientras
 | 1 | El esqueleto: `from`, `select` de columnas, `eq`, `order`, `limit`, `single`/`maybeSingle`, y el **reventar** ante lo no soportado | Contra MySQL real, tabla por tabla | ✅ |
 | 2 | El resto de filtros: `in`, `is`, `neq`, `not`, `gt/gte/lt/lte`, `ilike` (`match`: cero usos) | Idem, caso por caso | ✅ |
 | 3 | Escrituras: `insert`, `update`, `delete`, `upsert` — y el `JSON.stringify` de las 8 columnas de array | Idem | ✅ |
-| 4 | `count` y `range`, con la semántica escrita | Comparando contra Postgres | ⬜ |
+| 4 | `count` y `range`, con la semántica escrita | Comparando contra Postgres | ✅ |
 | 5 | **Los 66 JOIN embebidos** | Empezando por el de `lib/acceso.js`, con la prueba de permisos en verde | ⬜ |
 | 6 | `.or()` y su gramática | Las cinco formas que hay hoy | ⬜ |
 | 7 | Las 12 `.rpc()` que faltan | Una por una | ⬜ |
@@ -342,6 +343,43 @@ convertiría en texto dentro de una columna `DATETIME`.
 | `upsert` con `ignoreDuplicates` | Sería `INSERT IGNORE`, que se traga **todos** los errores recuperables: un texto largo se corta y una fecha mala se vuelve ceros, en silencio. Cero usos. |
 | `.select()` sobre una tabla sin clave primaria | No hay forma de volver a encontrar lo escrito. |
 | `throwOnError` | Devolverse a sí mismo sería mentir a medias. Cero usos. |
+
+---
+
+## 8 · Tramo 4 — contar y paginar
+
+**54 `count: 'exact'`** (44 de ellos con `head: true`, o sea «cuéntalas y no me
+las traigas») y **18 `.range()`**. Ni un `planned`, ni un `estimated`.
+
+### El conteo ignora el `range` — y no es una interpretación
+
+`routes/eventos.js:142` pide `count: 'exact'` junto con
+`.range(tramo.desde, tramo.hasta)` y usa el `count` para paginar. Si el conteo
+respetara el rango, esa pantalla diría «10 de 10» en vez de «10 de 1234»: o
+sea que **la paginación de producción ya estaría rota hoy**. No lo está, luego
+el conteo es el total.
+
+Así que son **dos consultas**: la de las filas y un `COUNT(*)` que se queda con
+el `WHERE` y tira el `ORDER BY` (no cambia cuántas hay y cuesta) y el `LIMIT`.
+`SQL_CALC_FOUND_ROWS` haría un solo viaje, pero está obsoleto desde MySQL
+8.0.17 y la propia documentación de MySQL recomienda justamente estas dos.
+
+### `range` tiene los dos extremos dentro
+
+`range(0, 9)` son **diez** filas. Equivocarse en ese borde **no da error**: da
+páginas que se solapan por una fila, y la última de cada página vuelve a salir
+la primera de la siguiente. Se ve como «este cliente aparece dos veces en la
+lista», no como un fallo.
+
+### Lo que lanza a propósito
+
+| | Por qué |
+|---|---|
+| `count: 'planned'` / `'estimated'` | Salen del planificador de Postgres y son **aproximados**. Traducirlos a un `COUNT(*)` de verdad sería «mejor» y por eso mismo sería mentira: quien pide una estimación espera que sea barata, no exacta. Cero usos. |
+| `head` sin `count` | No devolvería ni filas ni cuenta. |
+| `range` y `limit` a la vez | Uno pisaría al otro y no está dicho cuál. Cero usos. |
+| un `range` al revés o negativo | |
+| `count` detrás de una escritura | Contar qué, y respecto a qué. Cero usos. |
 
 ### Lo que NO está cableado todavía
 

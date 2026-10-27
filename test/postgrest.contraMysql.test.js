@@ -410,6 +410,66 @@ test('adaptador contra MySQL de verdad', { skip: SALTAR && 'pon MYSQL_PRUEBAS=1'
     assert.equal(despues, antes, 'la fila buena se quedó dentro: no hubo rollback');
   });
 
+  /* ── Tramo 4: contar y paginar ─────────────────────────────────────── */
+
+  await t.test('el conteo NO respeta el range: devuelve el total', async () => {
+    /* La prueba que justifica todo el tramo. `routes/eventos.js:142` pide
+       `count` junto con `.range()` y pagina con ese número: si el conteo
+       respetara el rango, la pantalla diría «2 de 2» en vez de «2 de 7» y
+       sólo habría una página. No daría error — daría una lista a medias. */
+    const { data, count, error } = await pg.from('eventos')
+      .select('id', { count: 'exact' }).order('id').range(0, 1);
+
+    assert.equal(error, null);
+    assert.equal(data.length, 2, 'el range tiene que cortar a dos filas');
+    assert.ok(count > 2, `el conteo devolvió ${count}: está respetando el range`);
+
+    const todas = await pg.from('eventos').select('id');
+    assert.equal(count, todas.data.length, 'el conteo tiene que ser el total de la tabla');
+  });
+
+  await t.test('el conteo SÍ respeta el filtro', async () => {
+    const { data, count } = await pg.from('eventos')
+      .select('id', { count: 'exact' }).eq('owner_id', 'juan').range(0, 0);
+    assert.equal(data.length, 1);
+    const juanes = await pg.from('eventos').select('id').eq('owner_id', 'juan');
+    assert.equal(count, juanes.data.length);
+  });
+
+  await t.test('head: true cuenta sin traer filas', async () => {
+    /* 44 de los 54 usos. `data` vuelve null, no una lista vacía: hay código
+       que mira `if (data)`. */
+    const { data, count, error } = await pg.from('eventos')
+      .select('*', { count: 'exact', head: true }).eq('owner_id', 'juan');
+    assert.equal(error, null);
+    assert.equal(data, null, 'con head no se traen filas');
+    assert.ok(count >= 1);
+  });
+
+  await t.test('range(0,9) y range(10,19) no comparten ninguna fila', () => {
+    /* El borde inclusivo. Si `range` fuera exclusivo por arriba, la fila 9
+       saldría en las dos páginas — y eso se ve como «este cliente aparece dos
+       veces», no como un error. Se comprueba sobre el SQL porque la tabla de
+       pruebas no tiene veinte filas. */
+    const uno = pg.from('eventos').select('id').range(0, 9)._compilar().sql;
+    const dos = pg.from('eventos').select('id').range(10, 19)._compilar().sql;
+    assert.match(uno, /LIMIT 10 OFFSET 0$/);
+    assert.match(dos, /LIMIT 10 OFFSET 10$/);
+  });
+
+  await t.test('range contra la base trae el trozo que toca', async () => {
+    const todas = await pg.from('eventos').select('id').order('id');
+    const trozo = await pg.from('eventos').select('id').order('id').range(1, 2);
+    assert.deepEqual(trozo.data.map(f => f.id), todas.data.slice(1, 3).map(f => f.id));
+  });
+
+  await t.test('un count sin filas que contar devuelve 0, no null', async () => {
+    const { data, count } = await pg.from('eventos')
+      .select('id', { count: 'exact' }).eq('owner_id', 'nadie-con-este-nombre');
+    assert.deepEqual(data, []);
+    assert.equal(count, 0);
+  });
+
   await t.test('un método no soportado LANZA aunque haya base detrás', async () => {
     await assert.rejects(
       async () => { await pg.from('eventos').select('*').or('a.eq.1,b.eq.2'); },
