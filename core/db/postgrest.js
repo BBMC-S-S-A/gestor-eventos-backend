@@ -85,6 +85,40 @@ function ident(nombre, de) {
   return `\`${n}\``;
 }
 
+/* ── Nombres cuando hay un JOIN (tramo 5b) ───────────────────────────────
+ *
+ * Sin JOIN, `estado` es `\`estado\`` y ya. Con JOIN hay dos tablas en juego y
+ * las dos pueden tener una columna que se llame igual —`id`, `created_at`,
+ * `nombre`—, así que TODO se cualifica: lo del padre con el nombre de su tabla
+ * y lo del embebido con su alias. Dejar una sin cualificar da
+ * `ER_NON_UNIQ_ERROR`, que al menos es ruidoso; pero si sólo una de las dos
+ * tablas tuviera esa columna, MySQL la resolvería CALLANDO y la consulta
+ * filtraría por la tabla equivocada.
+ *
+ * `ctx` es `{ tabla, unidos }`, donde `unidos` son los alias que de verdad
+ * están unidos con `INNER JOIN`. Sin `ctx` —las escrituras, las consultas de
+ * los hijos— un nombre con punto lanza, que es lo que hacía el tramo 5.
+ */
+function cualificar(col, ctx, de) {
+  const texto = String(col);
+  const punto = texto.indexOf('.');
+
+  if (punto !== -1) {
+    const alias = texto.slice(0, punto);
+    const resto = texto.slice(punto + 1);
+    if (!ctx || !ctx.unidos.has(alias)) {
+      noSoportado(
+        `filtrar por \`${texto}\`, que es una columna de una tabla embebida` +
+        (ctx ? ` que no está unida con \`!inner\`` : ''), '5b');
+    }
+    return `${ident(alias, de)}.${ident(resto, de)}`;
+  }
+
+  return (ctx && ctx.unidos.size)
+    ? `${ident(ctx.tabla, de)}.${ident(texto, de)}`
+    : ident(texto, de);
+}
+
 /* ── El `select` ─────────────────────────────────────────────────────────
  *
  * PostgREST mete tres cosas distintas en la misma cadena:
@@ -200,14 +234,19 @@ function parsearSeleccion(seleccion, nivel = 0) {
    se añaden se apuntan en `sobran` para borrarlas de la respuesta: PostgREST
    no devuelve `rol_id` si sólo pidieron `custom_permissions` y `rol_detail`, y
    devolverla de más sería una diferencia tonta que acaba en una pantalla. */
-function columnasDelPadre(arbol, extras = []) {
-  if (arbol.campos.includes('*')) return { sql: '*', sobran: [] };
+function columnasDelPadre(arbol, extras = [], ctx = null) {
+  const pre = (ctx && ctx.unidos.size) ? `${ident(ctx.tabla, 'un `from`')}.` : '';
+  /* Con JOIN, `*` traería también las columnas del embebido —y machacaría las
+     del padre que se llamen igual—. `tabla.*` es sólo lo del padre, que es lo
+     que PostgREST devuelve: el embebido va aparte, en su propio campo. */
+  if (arbol.campos.includes('*')) return { sql: `${pre}*`, sobran: [] };
   const puestas = new Set(arbol.campos.map(c => c.replace(/`/g, '')));
   /* `Set` porque dos embebidos pueden ir por la misma columna, y repetirla
      daría un `SELECT a, a` — válido pero tonto, y una fila con la columna dos
      veces. */
   const sobran = [...new Set(extras)].filter(c => !puestas.has(c));
-  const todas = [...arbol.campos, ...sobran.map(c => ident(c, 'una clave de embebido'))];
+  const todas = [...arbol.campos.map(c => pre + c),
+                 ...sobran.map(c => pre + ident(c, 'una clave de embebido'))];
   return { sql: todas.join(', '), sobran };
 }
 
@@ -241,8 +280,8 @@ function columnas(seleccion) {
  * quien llama lo dice explícitamente —`routes/vacantes.js:73` es el único hoy—
  * manda lo que diga.
  */
-function unOrden({ col, ascending, nullsFirst }) {
-  const c = ident(col, 'un `order`');
+function unOrden({ col, ascending, nullsFirst }, ctx = null) {
+  const c = cualificar(col, ctx, 'un `order`');
   const dir = ascending ? 'ASC' : 'DESC';
   const primero = (nullsFirst ?? !ascending) ? 'DESC' : 'ASC';
   return `(${c} IS NULL) ${primero}, ${c} ${dir}`;
@@ -302,15 +341,8 @@ function esIs(c, valor) {
 /* Una condición. `profundidad` existe sólo para que un `not` no pueda anidar
    otro `not`: PostgREST no lo permite y no hay ninguno, así que es una puerta
    cerrada a propósito. */
-function condicion(f, params, profundidad = 0) {
-  /* `.gt('tipo.precio', 0)` filtra por una columna de la tabla embebida. En
-     PostgREST eso obliga a un `!inner`, y aquí a un JOIN de verdad: son los
-     mismos 2 usos del tramo 5b. Sin este mensaje saldría como «el nombre
-     `tipo.precio` no vale», que no dice qué falta. */
-  if (String(f.col).includes('.')) {
-    noSoportado(`filtrar por \`${f.col}\`, que es una columna de una tabla embebida`, '5b');
-  }
-  const c = ident(f.col, `un \`${f.tipo}\``);
+function condicion(f, params, ctx = null, profundidad = 0) {
+  const c = cualificar(f.col, ctx, `un \`${f.tipo}\``);
 
   switch (f.tipo) {
     case 'eq':
@@ -366,7 +398,7 @@ function condicion(f, params, profundidad = 0) {
 
     case 'not': {
       if (profundidad > 0) noSoportado('un `not` dentro de otro `not`');
-      return `NOT (${condicion({ tipo: f.op, col: f.col, valor: f.valor }, params, profundidad + 1)})`;
+      return `NOT (${condicion({ tipo: f.op, col: f.col, valor: f.valor }, params, ctx, profundidad + 1)})`;
     }
 
     default:
@@ -380,15 +412,17 @@ function condicion(f, params, profundidad = 0) {
  * probar entera en un CI sin MySQL.
  */
 function compilar(plan) {
+  const ctx = contexto(plan);
   const partes = [`SELECT ${plan.columnas} FROM ${ident(plan.tabla, 'un `from`')}`];
+  partes.push(...unionesSql(plan));
   const params = [];
 
   if (plan.filtros.length) {
-    const donde = plan.filtros.map(f => condicion(f, params));
+    const donde = plan.filtros.map(f => condicion(f, params, ctx));
     partes.push(`WHERE ${donde.join(' AND ')}`);
   }
 
-  if (plan.orden.length) partes.push(`ORDER BY ${plan.orden.map(unOrden).join(', ')}`);
+  if (plan.orden.length) partes.push(`ORDER BY ${plan.orden.map(o => unOrden(o, ctx)).join(', ')}`);
 
   /* El límite.
    *
@@ -429,6 +463,24 @@ function compilar(plan) {
   return { sql: partes.join(' '), params };
 }
 
+/* El contexto de nombres: la tabla de arriba y los alias unidos de verdad. */
+function contexto(plan) {
+  return { tabla: plan.tabla, unidos: new Map((plan.unidos || []).map(u => [u.alias, u])) };
+}
+
+/* Las cláusulas `INNER JOIN`, una por embebido con `!inner`.
+ *
+ * El JOIN está aquí SÓLO para descartar filas del padre: las columnas del
+ * embebido se siguen trayendo con su propia consulta (tramo 5). Mezclar las
+ * dos cosas es lo que multiplica filas, y aquí no hace falta — un `!inner`
+ * hacia muchos-a-uno casa con una fila como mucho. */
+function unionesSql(plan) {
+  return (plan.unidos || []).map(u =>
+    `INNER JOIN ${ident(u.tabla, 'un `!inner`')} AS ${ident(u.alias, 'un `!inner`')} ` +
+    `ON ${ident(plan.tabla, 'un `from`')}.${ident(u.colPadre, 'un `!inner`')} = ` +
+    `${ident(u.alias, 'un `!inner`')}.${ident(u.colHijo, 'un `!inner`')}`);
+}
+
 /* La consulta que cuenta.
  *
  * Es OTRA consulta, no la misma con un COUNT delante, y eso es el asunto
@@ -449,10 +501,16 @@ function compilar(plan) {
  * MySQL recomienda justamente estas dos consultas.
  */
 function compilarConteo(plan) {
+  const ctx = contexto(plan);
   const params = [];
-  const donde = plan.filtros.map(f => condicion(f, params));
-  const sql = `SELECT COUNT(*) AS n FROM ${ident(plan.tabla, 'un `from`')}`
-            + (donde.length ? ` WHERE ${donde.join(' AND ')}` : '');
+  const donde = plan.filtros.map(f => condicion(f, params, ctx));
+  /* El JOIN va TAMBIÉN en el conteo. Si no, un `!inner` recortaría la página
+     pero el total seguiría siendo el de la tabla entera: «10 de 1234» cuando
+     de verdad hay 12. Es el mismo fallo de siempre — un número creíble y
+     equivocado. */
+  const sql = [`SELECT COUNT(*) AS n FROM ${ident(plan.tabla, 'un `from`')}`,
+               ...unionesSql(plan),
+               ...(donde.length ? [`WHERE ${donde.join(' AND ')}`] : [])].join(' ');
   return { sql, params };
 }
 
@@ -475,6 +533,31 @@ async function ejecutar(plan, { base = bd('datos') } = {}) {
   let cuenta = null;
   try {
     if (plan.accion === 'select') {
+      /* Con embebidos hay que saber por qué columna se va a buscar cada uno
+         ANTES de armar el SELECT del padre: si pidieron `custom_permissions,
+         rol_detail:…!rol_id(…)`, hace falta traer también `rol_id` aunque
+         nadie lo haya pedido — y borrarlo después, porque PostgREST no lo
+         devuelve.
+
+         Y antes DEL CONTEO, no sólo antes del SELECT. Un `!inner` cambia
+         cuántas filas hay, así que resolverlo después dejaba el conteo sin el
+         JOIN: la página venía recortada y el total seguía siendo el de la
+         tabla entera —«1 de 2» cuando de verdad hay 1—. Un número creíble y
+         equivocado, que es el peor de todos. Lo cazó la prueba del conteo
+         con `!inner`. */
+      let resueltos = [];
+      if (plan.arbol.embebidos.length) {
+        resueltos = await resolverEmbebidos(plan.tabla, plan.arbol.embebidos, base);
+        /* Los `!inner` se apuntan ANTES de compilar: cambian el SELECT del
+           padre (todo se cualifica), el WHERE, el ORDER BY y —sobre todo— el
+           conteo. */
+        plan.unidos = resueltos.filter(e => e.inner);
+        const { sql: cols, sobran } = columnasDelPadre(
+          plan.arbol, resueltos.map(e => e.colPadre), contexto(plan));
+        plan.columnas = cols;
+        plan.sobran = sobran;
+      }
+
       if (plan.contar) {
         const c = compilarConteo(plan);
         cuenta = Number((await base.consultar(c.sql, c.params))[0].n);
@@ -483,20 +566,6 @@ async function ejecutar(plan, { base = bd('datos') } = {}) {
          petición HEAD y `data` vuelve null; traer las filas igual sería
          trabajo que nadie pidió, y son 44 de los 54 usos. */
       if (plan.soloContar) return { data: null, error: null, count: cuenta };
-
-      /* Con embebidos hay que saber por qué columna se va a buscar cada uno
-         ANTES de armar el SELECT del padre: si pidieron `custom_permissions,
-         rol_detail:…!rol_id(…)`, hace falta traer también `rol_id` aunque
-         nadie lo haya pedido — y borrarlo después, porque PostgREST no lo
-         devuelve. */
-      let resueltos = [];
-      if (plan.arbol.embebidos.length) {
-        resueltos = await resolverEmbebidos(plan.tabla, plan.arbol.embebidos, base);
-        const { sql: cols, sobran } = columnasDelPadre(
-          plan.arbol, resueltos.map(e => e.colPadre));
-        plan.columnas = cols;
-        plan.sobran = sobran;
-      }
 
       const { sql, params } = compilar(plan);
       filas = await base.consultar(sql, params);
@@ -639,14 +708,16 @@ async function resolverEmbebido(padre, emb, base) {
 async function resolverEmbebidos(padre, embebidos, base) {
   const salida = [];
   for (const e of embebidos) {
-    if (e.inner) {
-      /* `!inner` descarta las filas del padre que no tengan hijo, y eso tiene
-         que pasar ANTES del `LIMIT` y del `count` o la página sale corta y el
-         total miente. Con la consulta aparte no se puede: hace falta un JOIN
-         de verdad en la consulta del padre. Son 2 usos de 66. */
-      noSoportado(`el embebido \`${e.alias}\` con \`!inner\``, '5b');
+    const r = await resolverEmbebido(padre, e, base);
+    if (r.inner && r.tipo === 'muchos') {
+      /* Un `!inner` hacia uno-a-muchos SÍ multiplica las filas del padre —tres
+         hijos, tres copias—, y entonces el `LIMIT` deja de contar filas del
+         padre y el `count` miente. PostgREST lo resuelve con un lateral; aquí
+         haría falta un `EXISTS`, que es otra cosa y nadie ha pedido. Los dos
+         `!inner` del código son muchos-a-uno. */
+      noSoportado(`un \`!inner\` hacia uno-a-muchos (\`${r.alias}\`): multiplicaría las filas del padre`);
     }
-    salida.push(await resolverEmbebido(padre, e, base));
+    salida.push(r);
   }
   return salida;
 }
@@ -946,7 +1017,7 @@ async function escribir(plan, base) {
 /* El WHERE de un plan, reutilizado por el delete y el update. */
 function sqlYParams(cabeza, plan) {
   const params = [];
-  const donde = plan.filtros.map(f => condicion(f, params));
+  const donde = plan.filtros.map(f => condicion(f, params, null));
   return [donde.length ? `${cabeza} WHERE ${donde.join(' AND ')}` : cabeza, params];
 }
 
@@ -965,7 +1036,7 @@ function sentenciaEscritura(plan, tabla, clave) {
       return `${ident(c, 'un `update`')} = ?`;
     });
     if (!sets.length) noSoportado('`update` sin ninguna columna que cambiar');
-    const donde = plan.filtros.map(f => condicion(f, params));
+    const donde = plan.filtros.map(f => condicion(f, params, null));
     return {
       sql: `UPDATE ${tabla} SET ${sets.join(', ')}` + (donde.length ? ` WHERE ${donde.join(' AND ')}` : ''),
       params, claves: [],
@@ -1041,6 +1112,7 @@ function constructor(tabla, opciones = {}) {
     columnas: '*',
     arbol   : { campos: ['*'], embebidos: [] },
     sobran  : [],      // columnas añadidas para buscar los embebidos
+    unidos  : [],      // embebidos con `!inner`: van como INNER JOIN
     filtros : [],
     orden   : [],
     limite  : null,
@@ -1247,3 +1319,4 @@ module.exports._compilar = compilar;
 module.exports._noSoportado = noSoportado;
 module.exports._valorEscribible = valorEscribible;
 module.exports._compilarConteo = compilarConteo;
+module.exports._cualificar = cualificar;
