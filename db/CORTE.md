@@ -362,7 +362,7 @@ Dos interruptores, **y el orden importa**.
 
 ### 6.1 · Google, primero
 
-Consola de Google → *Credenciales* → el cliente OAuth **que ya usa Supabase**
+Consola de Google → *Credenciales* → el cliente OAuth que se vaya a usar
 → *URI de redirección autorizados* → **añadir** (no sustituir):
 
 ```
@@ -372,10 +372,27 @@ https://api.gestekeventost.dpdns.org/auth/google/callback
 **Se añade, no se cambia:** mientras Supabase siga encendido, su URI tiene que
 seguir ahí.
 
-**El `client_id` tiene que ser el mismo.** Google identifica a cada persona con
-un `sub` distinto por cada cliente. Con un cliente nuevo, los 22 `sub` que se
-migraron no coinciden con nada, y esas 22 personas entrarían a **cuentas
-nuevas y vacías**, con sus eventos dentro de las viejas.
+**El `client_id` NO tiene que ser el mismo.** Aquí decía lo contrario y era
+falso; de esa frase salió el bloqueo de octubre. Google declara
+`subject_types_supported: ["public"]`, o sea el **mismo `sub` para todos los
+clientes** (OIDC Core §8). Los `sub` migrados valen con cualquiera, así que se
+puede usar «GESTEK backend» (`1041688673678-…`) en vez del cliente del
+proyecto `558760544025`, que quedó sin dueño accesible.
+
+Comprobarlo el día del corte, que es gratis y tarda un segundo:
+
+```bash
+curl -s https://accounts.google.com/.well-known/openid-configuration \
+  | grep -o '"subject_types_supported":[^]]*]'
+# "subject_types_supported":["public"]
+```
+
+**Y mirar el registro en la primera hora.** Cada vez que alguien entre con un
+`sub` que no estaba guardado, sale
+`[auth/google] identidad re-enlazada por correo: usuario=… sub=…`. Un puñado
+es normal (quien tenía contraseña y pulsa Google). **Ochenta y dos en una
+hora significa que el `sub` cambió** — la gente entra igual, por el correo
+verificado, pero hay que saberlo.
 
 ### 6.2 · El backend
 

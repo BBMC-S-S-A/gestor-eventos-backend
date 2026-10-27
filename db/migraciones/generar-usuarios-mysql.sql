@@ -31,15 +31,25 @@
  * NULL a propósito. Una cadena vacía sería un hash que bcrypt rechaza siempre,
  * pero que se confunde con «no configurada».
  *
- * **El emparejamiento con Google es por `sub`, no por correo.** Quien cambie
- * su dirección en Google conserva su cuenta. Emparejar por correo es el fallo
- * clásico: la persona entra y se encuentra una cuenta vacía.
+ * **El emparejamiento con Google es por `sub` PRIMERO, y por correo después.**
+ * El `sub` va primero porque es lo estable: quien cambie su dirección en Google
+ * conserva su cuenta. Emparejar sólo por correo es el fallo clásico —la persona
+ * entra y se encuentra una cuenta vacía—, pero no tenerlo de respaldo es el
+ * otro: quien se registró con contraseña y un día pulsa Google acabaría con dos
+ * cuentas. `modules/auth/google.js` hace los dos, en ese orden, y el segundo
+ * exige `email_verified`.
  *
- * ── Lo que hay hoy, medido el 4 de septiembre de 2026 ───────────────────
+ * **Lo que NO hay que creerse:** que el `sub` dependa del `client_id`. Este
+ * repositorio lo afirmó durante meses en cuatro sitios y es falso — Google
+ * declara `subject_types_supported: ["public"]`, o sea el mismo `sub` para
+ * todos los clientes OAuth. Estos `sub` que se copian aquí valen con cualquier
+ * cliente. Lo fija `test/elSubDeGoogleEsPublico.test.js`.
  *
- *   | 29 | cuentas vivas                                   |
- *   | 10 | entran con contraseña                           |
- *   | 22 | entran con Google                               |
+ * ── Lo que hay hoy, medido el 27 de octubre de 2026 ─────────────────────
+ *
+ *   | 96 | cuentas vivas                                   |
+ *   | 14 | entran con contraseña                           |
+ *   | 85 | entran con Google                               |
  *   |  0 | **sin ninguna forma de entrar**                 |
  *
  * Ese último cero es el que decide si se puede encender `AUTH_PROPIA`. Si
@@ -47,7 +57,8 @@
  * contraseña» ANTES del corte, no después: el día del corte ya no tienen a
  * quién pedírselo.
  *
- * (10 + 22 = 32 > 29 a propósito: hay quien tiene las dos cosas.)
+ * (14 + 85 = 99 > 96 a propósito: hay tres que tienen las dos cosas. O sea que
+ * 82 dependen SÓLO de Google, y son los que importan en el párrafo de arriba.)
  *
  * **`AUTH_PROPIA` sigue apagado** mientras tanto. Esto sólo llena la tabla; el
  * día que se encienda, la gente ya está dentro. Al revés —encender primero y

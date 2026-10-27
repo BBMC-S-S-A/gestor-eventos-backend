@@ -171,8 +171,8 @@ bien: mirar `comprobar-base.js`.
 
 ## 5 · Google
 
-En la consola de Google → *Credenciales* → el cliente OAuth **que ya usa
-Supabase** → *URI de redirección autorizados* → **añadir** (no sustituir):
+En la consola de Google → *Credenciales* → el cliente OAuth que se vaya a usar
+→ *URI de redirección autorizados* → **añadir** (no sustituir):
 
 ```
 https://api.gestekeventost.dpdns.org/auth/google/callback
@@ -181,10 +181,21 @@ https://api.gestekeventost.dpdns.org/auth/google/callback
 Se añade, no se cambia: mientras Supabase siga encendido, su URI tiene que
 seguir ahí o los usuarios que entren por el camino viejo se quedan fuera.
 
-**El `client_id` tiene que ser el mismo.** Google identifica a cada persona con
-un `sub` que es distinto para cada cliente. Con un cliente nuevo, los 22 `sub`
-que se migraron no coinciden con nada, y esas 22 personas entrarían a cuentas
-nuevas y vacías con sus eventos dentro de las viejas.
+**El `client_id` NO tiene que ser el mismo.** Aquí decía lo contrario y era
+falso. Google declara `subject_types_supported: ["public"]` en
+`https://accounts.google.com/.well-known/openid-configuration`, o sea que el
+`sub` identifica a la Cuenta de Google y es **el mismo para todos los
+clientes** (OIDC Core §8 sólo define `public` y `pairwise`, y Google no ofrece
+`pairwise`). Los `sub` migrados valen con cualquier cliente OAuth.
+
+Eso importa porque el cliente que usa Supabase vive en el proyecto de Google
+`558760544025`, que quedó sin dueño accesible. Se puede usar «GESTEK backend»
+(`1041688673678-…`) sin que nadie pierda su cuenta.
+
+Y por debajo queda la red: `resolverUsuario` empareja por `sub` y, si no lo
+encuentra, por correo verificado — avisando en el registro. Medido el 27 de
+octubre de 2026: 96 cuentas, 85 con Google, 82 sólo con Google, 14 con
+contraseña. Lo fija `test/elSubDeGoogleEsPublico.test.js`.
 
 ---
 

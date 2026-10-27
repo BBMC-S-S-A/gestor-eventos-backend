@@ -9,15 +9,51 @@
  * calendario). No se importa aquel archivo porque su `redirect_uri` y su
  * `state` son los suyos, y mezclarlos haría que tocar uno rompiera el otro.
  *
- * ── Lo que NO puede cambiar ───────────────────────────────────────────────
+ * ── El `client_id` SÍ se puede cambiar ───────────────────────────────────
  *
- * El `client_id`. 22 de los 29 usuarios entran por aquí, y Google identifica a
- * cada persona con un `sub` que es distinto para cada `client_id`. Con un
- * cliente nuevo, los 22 `sub` guardados no coinciden con ninguno de los que
- * mande Google, y esas 22 personas entrarían a cuentas nuevas y vacías con sus
- * eventos dentro de las viejas. Hay que reutilizar el cliente que usa Supabase
- * hoy y añadirle nuestra `redirect_uri` en la consola. Es una pantalla, pero si
- * se descubre tarde afecta a tres de cada cuatro usuarios.
+ * Aquí decía lo contrario, y era falso. Decía que Google le da a cada persona
+ * un `sub` propio de cada `client_id`, y que por eso había que reutilizar
+ * obligatoriamente el cliente OAuth que usa Supabase. De ahí salía el miedo a
+ * tocarlo, y de ahí salió un bloqueo real: el proyecto de Google que contiene
+ * ese cliente (número 558760544025) quedó sin dueño accesible.
+ *
+ * **Google publica la respuesta y es que no.** En su documento de
+ * descubrimiento:
+ *
+ *     $ curl -s https://accounts.google.com/.well-known/openid-configuration
+ *     "subject_types_supported": ["public"]
+ *
+ * OpenID Connect sólo define dos valores para eso (OIDC Core §8):
+ *
+ *   · `pairwise` — el `sub` cambia de un cliente a otro. Es lo que hacen
+ *                  Apple (por equipo) y Entra ID. Sería el caso malo.
+ *   · `public`   — EL MISMO `sub` para todos los clientes. Es el identificador
+ *                  de la Cuenta de Google, no de la pareja cuenta-aplicación.
+ *
+ * Google sólo ofrece `public`: ni siquiera implementa `pairwise`. Así que los
+ * `sub` migrados desde Supabase valen con CUALQUIER cliente OAuth, y se puede
+ * usar «GESTEK backend» (1041688673678-…), que es el que la empresa sí
+ * controla, sin que nadie pierda su cuenta.
+ *
+ * Comprobado el 27 de octubre de 2026. Es un documento público y estable; si
+ * algún día Google añadiera `pairwise`, aparecería ahí, y la forma de volver a
+ * comprobarlo es ese mismo `curl`. Lo cubre `test/elSubDeGoogleEsPublico.test.js`.
+ *
+ * ── Y aun así, la red debajo ─────────────────────────────────────────────
+ *
+ * `resolverUsuario` empareja por `sub` y, si no lo encuentra, por correo
+ * verificado. O sea que aunque lo de arriba fuera mentira, nadie se quedaría
+ * fuera: entraría por el segundo camino y la identidad se re-enlazaría sola.
+ * Ese segundo camino AVISA en el registro (ver allí el porqué), que es como se
+ * sabe el día del corte si el `sub` cambió o no, en vez de suponerlo.
+ *
+ * ── Lo que sí hay que hacer con el cliente que se elija ──────────────────
+ *
+ * Añadirle nuestra `redirect_uri` en la consola de Google, **sin quitar** la
+ * de Supabase mientras Supabase siga encendido. Un cliente admite varias.
+ *
+ * Medido el 27 de octubre de 2026 sobre las cuentas de producción: 96 cuentas,
+ * 85 con Google, 82 **sólo** con Google, 14 con contraseña.
  *
  * ── El estado ─────────────────────────────────────────────────────────────
  *
@@ -145,6 +181,26 @@ async function resolverUsuario(perfil, { repo }) {
     const existente = await repo.porEmail(correo);
     if (existente) {
       await repo.enlazarIdentidad({ usuarioId: existente.id, proveedor: 'google', proveedorId: sub, email: correo });
+      /* Por qué esto AVISA y no pasa callado.
+       *
+       * Llegar aquí significa que una cuenta que ya existía no tenía guardado
+       * este `sub`. Hay tres motivos posibles y los tres interesan:
+       *
+       *   · Alguien que se registró con contraseña pulsó Google por primera
+       *     vez. Normal, y es lo que se espera que salga de vez en cuando.
+       *   · Una identidad no se migró desde Supabase. Eso es un fallo del
+       *     volcado y hay que verlo, no descubrirlo por una queja.
+       *   · El `sub` CAMBIÓ al cambiar de cliente OAuth. Según el documento de
+       *     descubrimiento de Google eso no puede pasar (ver cabecera), pero
+       *     esta línea es la que lo demuestra en vez de suponerlo: si el día
+       *     del corte salen 82 de estos en una hora, el `sub` cambió.
+       *
+       * El usuario entra igual en los tres casos: esto es un registro, no una
+       * puerta. Va el id de la cuenta y el `sub` —que es un identificador
+       * público, el mismo que ya está guardado en la base—, no el correo: el
+       * registro de la aplicación lo lee quien administre el cPanel y no tiene
+       * por qué llevar direcciones de nadie para diagnosticar esto. */
+      console.warn(`[auth/google] identidad re-enlazada por correo: usuario=${existente.id} sub=${sub}`);
       /* Si llega por Google con el correo verificado y su cuenta estaba sin
          confirmar, queda confirmada: el correo ya está probado. */
       if (!existente.emailConfirmado) await repo.marcarConfirmado(existente.id);
