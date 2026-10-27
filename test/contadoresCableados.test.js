@@ -171,8 +171,9 @@ test('un fallo del contador NO tumba la petición', async () => {
 });
 
 test('sumar cero no viaja a la base', async () => {
-  /* Llega de verdad: `ajustarAforo` de clientes.js calcula un delta que da 0
-     cuando se edita una boleta sin cambiarle el tipo. */
+  /* `ajustarAforo` de clientes.js calcula un delta que puede dar 0, aunque
+     hoy lo filtra él mismo antes de llamar. Esto es la red por si un llamador
+     nuevo no lo filtra. */
   const { mod, llamadas, restaurar } = cargarCostura({ datosPropios: false });
   await mod.sumarAforoVendido('e1', 0);
   await mod.sumarVendidosTipo('t1', 0);
