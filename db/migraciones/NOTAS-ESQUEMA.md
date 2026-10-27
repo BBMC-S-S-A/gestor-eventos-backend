@@ -75,13 +75,41 @@ conviene decirlo: el resto salió igual o peor.
 | `ticket_types` | `zonas_acceso` | `text[]` |
 | `webhooks` | `eventos` | `text[]` |
 
-Pasan a `JSON`. La columna guarda lo mismo, pero **lo que hoy se consulta con
-`@>` o `= ANY(...)` deja de funcionar** y hay que reescribirlo con
-`JSON_CONTAINS` / `MEMBER OF`.
+Pasan a `JSON`.
 
-`event_members.custom_permissions` es la que más importa: la lee
-`core/permisos/cargarEvento()`, o sea el guardia de todas las rutas de evento.
-Cuando se toque, la prueba de permisos tiene que seguir en verde.
+### Medido el 27-oct, y es menos trabajo del que esto daba a entender
+
+Este apartado decía «esto sí toca código» y dejaba suponer un frente grande.
+Comprobado contra MySQL 8.0.46 y contra el código entero, son tres cosas y
+sólo una era trabajo:
+
+**1 · Leerlas no cambia nada.** mysql2 parsea una columna `JSON` a un array de
+JavaScript de verdad: `Array.isArray` da `true` y `.includes()` funciona. Así
+que todo el código que las trata como arreglo —que es casi todo: `routes/chat.js`,
+`lib/acceso.js`, `lib/alcanceMcp.js`, `lib/oauth.js`, `routes/vacantes.js`—
+**sigue igual sin tocar una línea**.
+
+Eso incluye `event_members.custom_permissions`, que es la que más miedo daba
+porque la lee `core/permisos/cargarEvento()`, el guardia de las 378 rutas. No
+hay nada que hacerle.
+
+**2 · Escribirlas pide `JSON.stringify`.** Pasar el array crudo a mysql2
+revienta con `ER_PARSE_ERROR` —expande el array como una lista de SQL— así que
+**falla ruidoso, no corrompe en silencio**, que es la forma buena de fallar.
+Hoy no hay ningún camino que escriba estas columnas en MySQL; cuando lo haya,
+la regla es ésta.
+
+**3 · Consultarlas con operadores de Postgres sí rompe, y en silencio.**
+`.contains()`, `.containedBy()` y `.overlaps()` de supabase-js son `@>`, `<@` y
+`&&`. Contra MySQL no dan error: **devuelven cero filas**. Los equivalentes se
+escriben `JSON_CONTAINS(col, JSON_QUOTE(?))` o `? MEMBER OF (col)`.
+
+En todo el código había **exactamente una**: el reparto de webhooks
+(`lib/webhooks.js`). Ya no está — filtra en JavaScript, que vale para los dos
+motores, y la lista que filtra son los webhooks activos de una cuenta (cero en
+producción al 27-oct, y por diseño un puñado).
+
+`test/losArraysNoSeConsultanConPostgres.test.js` falla si entra la segunda.
 
 Y un caso aparte: **`chat_channels.rol_ids` está indexada** con un índice GIN.
 MySQL no indexa una columna JSON entera; hay que decirle qué se busca dentro,
