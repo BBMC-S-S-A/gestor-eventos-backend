@@ -156,8 +156,13 @@ test('un método que no existe lanza y dice cuál era', () => {
    tramo lo implementó; contar y paginar se prueban en
    `postgrest.contar.test.js`. */
 
-test('las funciones lanzan y mandan al tramo 7', () => {
-  lanza(() => pg.rpc('aforo_zonas', { p_evento: 'x' }), /tramo 7/);
+test('una función que el adaptador no conoce lanza y manda al tramo 7', () => {
+  /* Las 14 que sí conoce se prueban en `postgrest.funciones.test.js`, con una
+     que recorre el código buscando `.rpc('…')` y comprueba que están todas.
+     Aquí queda el caso contrario: pedir una que no existe es un fallo de
+     cableado, y tiene que saltar en vez de pasar por una rama de «no se pudo»
+     que nadie mira. */
+  lanza(() => pg.rpc('una_que_nadie_escribio', { p: 1 }), /tramo 7/);
 });
 
 test('storage y auth lanzan: son otras banderas', () => {

@@ -1450,6 +1450,89 @@ function constructor(tabla, opciones = {}) {
   return envuelto;
 }
 
+/* ══ LAS FUNCIONES (tramo 7) ════════════════════════════════════════════
+ *
+ * El backend llama 12 funciones de Postgres con `.rpc(nombre, args)`. En MySQL
+ * no hay ninguna: están todas escritas en JavaScript, en sus módulos de
+ * dominio. Esto es sólo la centralita que dice cuál es cuál.
+ *
+ * ── Por qué una tabla y no un `switch` ───────────────────────────────────
+ *
+ * Porque así la lista de lo que FALTA es la propia tabla: lo que no esté aquí
+ * lanza con su nombre dentro. Un `switch` con `default: throw` hace lo mismo,
+ * pero no se puede recorrer para comprobar que están las doce — y eso es justo
+ * lo que hace una de las pruebas.
+ *
+ * ── Los `require` van DENTRO de cada entrada ─────────────────────────────
+ *
+ * Igual que en `lib/contadores.js`: estos módulos hablan con MySQL al
+ * cargarse, y cargarlos desde aquí arriba los traería aunque `DATOS_PROPIOS`
+ * esté apagada. Hoy lo está, y el día del corte sólo se enciende la bandera.
+ *
+ * ── Lo que NO está aquí ──────────────────────────────────────────────────
+ *
+ * `generar_recordatorios_inapp` SÍ está, y es un caso curioso: la función de
+ * Postgres lleva rota desde que se escribió —inserta en `notificaciones` una
+ * columna `link` que esa tabla no tiene, y `recordatorio_inapp_log` ni
+ * siquiera existe (comprobado contra producción el 27-oct)—, así que nunca ha
+ * creado una sola fila. `modules/recordatorios` la reescribió arreglada. O
+ * sea que al migrar esto EMPIEZA a funcionar; no es una regresión, pero
+ * conviene saberlo antes de que aparezcan avisos que nadie había visto nunca.
+ */
+const FUNCIONES = {
+  /* Las cuatro de aforo — `modules/aforo/consultas.js`. */
+  aforo_zonas         : (a) => require('../../modules/aforo/consultas.js').ocupacionViva(a.p_evento),
+  aforo_zonas_resumen : (a) => require('../../modules/aforo/consultas.js').resumen(a.p_evento),
+  aforo_zonas_serie   : (a) => require('../../modules/aforo/consultas.js').serie(a.p_evento, a.p_minutos),
+  aforo_zonas_estancia: (a) => require('../../modules/aforo/consultas.js').estancia(a.p_evento),
+
+  /* Los contadores y el canje — `modules/contadores/index.js`. */
+  canjear_recompensa  : (a) => require('../../modules/contadores/index.js').canjearRecompensa(a.p_user, a.p_recompensa),
+  sumar_aforo_vendido : (a) => require('../../modules/contadores/index.js').sumarAforoVendido(a.p_evento, a.p_delta),
+  sumar_vendidos_tipo : (a) => require('../../modules/contadores/index.js').sumarVendidosTipo(a.p_tipo, a.p_delta),
+
+  /* Los recordatorios — `modules/recordatorios/index.js`. */
+  find_pending_reminders     : (a) => require('../../modules/recordatorios/index.js').pendientesDeCorreo(a.p_limit),
+  generar_recordatorios_inapp: ()  => require('../../modules/recordatorios/index.js').generarAvisosEnApp(),
+
+  /* Las reservas de espacio — `modules/espacios/index.js`. */
+  retener_espacio   : (a) => require('../../modules/espacios/index.js').retener(a.p_espacio, a.p_evento, a.p_sesion, a.p_minutos),
+  liberar_espacio   : (a) => require('../../modules/espacios/index.js').liberar(a.p_espacio, a.p_sesion),
+  confirmar_espacio : (a) => require('../../modules/espacios/index.js').confirmar(a.p_espacio, a.p_sesion, a.p_ticket),
+
+  /* Las promociones y la limpieza de OAuth. */
+  promocion_consumir: (a) => require('../../modules/promociones/index.js').consumir(a.p_id),
+  oauth_barrer      : ()  => require('../../modules/oauth/index.js').barrer(),
+};
+
+/* `supabase.rpc(nombre, args)` devuelve `{ data, error }`, igual que una
+ * consulta, y así están escritas las 12 llamadas. Un error de dentro de la
+ * función vuelve como `error` —no lanzado—, porque es lo que hace supabase-js:
+ * `retener_espacio` lanza `ESPACIO_OCUPADO` a propósito y hay una ruta que lo
+ * lee de `error.message` para decirle a quien compra que esa silla ya no está.
+ *
+ * Lo que SÍ lanza es pedir una función que no existe: eso es un fallo de
+ * cableado, no un caso de negocio, y taparlo como `{ error }` lo dejaría
+ * pasando por una rama de «no se pudo» que nadie mira. */
+function llamarFuncion(nombre, args = {}) {
+  const fn = FUNCIONES[nombre];
+  /* La comprobación del nombre es SÍNCRONA a propósito: si estuviera dentro de
+     la parte asíncrona, un nombre mal escrito saldría como una promesa
+     rechazada, y una promesa que nadie espera se pierde sin ruido. Un fallo de
+     cableado tiene que saltar en la línea que lo escribió. */
+  if (!fn) noSoportado(`la función \`${nombre}()\``, 7);
+  return ejecutarFuncion(fn, args);
+}
+
+async function ejecutarFuncion(fn, args) {
+  try {
+    const data = await fn(args || {});
+    return { data: data === undefined ? null : data, error: null, count: null };
+  } catch (e) {
+    return { data: null, error: errorPgrst(e.message, { code: e.code || 'PGRST_FUNCION' }), count: null };
+  }
+}
+
 /* ── La puerta ───────────────────────────────────────────────────────────
  *
  * La misma forma que el cliente de supabase, para que `lib/supabase.js` pueda
@@ -1458,7 +1541,7 @@ function constructor(tabla, opciones = {}) {
 function crear(opciones = {}) {
   return {
     from: (tabla) => constructor(tabla, opciones),
-    rpc : (nombre) => noSoportado(`la función \`${nombre}()\``, 7),
+    rpc : (nombre, args) => llamarFuncion(nombre, args),
     /* `storage` y `auth` no viven aquí: los cubren `ARCHIVOS_PROPIOS` y
        `AUTH_PROPIA`, que son banderas aparte. Si alguien los pide desde este
        objeto es que se cableó mal, y tiene que saltar. */
@@ -1474,3 +1557,4 @@ module.exports._noSoportado = noSoportado;
 module.exports._valorEscribible = valorEscribible;
 module.exports._compilarConteo = compilarConteo;
 module.exports._cualificar = cualificar;
+module.exports._FUNCIONES = FUNCIONES;
