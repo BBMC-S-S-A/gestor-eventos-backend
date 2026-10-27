@@ -125,12 +125,16 @@ const lanza = (fn, trozo) => {
 };
 
 test('un método que no existe lanza y dice cuál era', () => {
-  /* Sin el Proxy esto sería «ilike is not a function», que no distingue entre
-     «falta implementarlo» y «está mal escrito». */
-  lanza(() => pg.from('t').select('*').ilike('nombre', '%ana%'), /\.ilike\(\)/);
-  lanza(() => pg.from('t').select('*').in('id', [1, 2]), /\.in\(\)/);
-  lanza(() => pg.from('t').select('*').is('borrado', null), /\.is\(\)/);
+  /* Sin el Proxy esto sería «or is not a function», que no distingue entre
+     «falta implementarlo» y «está mal escrito».
+
+     `ilike`, `in` e `is` estaban aquí hasta el tramo 2, que los implementó.
+     Sus pruebas viven ahora en `postgrest.filtros.test.js`; esta se queda con
+     los que de verdad siguen sin soporte. */
   lanza(() => pg.from('t').select('*').or('a.eq.1,b.eq.2'), /\.or\(\)/);
+  lanza(() => pg.from('t').select('*').contains('zonas', ['vip']), /\.contains\(\)/);
+  lanza(() => pg.from('t').select('*').range(0, 9), /\.range\(\)/);
+  lanza(() => pg.from('t').select('*').textSearch('nombre', 'ana'), /\.textSearch\(\)/);
 });
 
 test('escribir lanza, y dice que es el tramo 3', () => {
