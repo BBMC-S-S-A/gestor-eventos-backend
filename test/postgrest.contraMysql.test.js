@@ -77,6 +77,7 @@ async function abrir() {
       owner_id  VARCHAR(36),
       fecha     DATE NULL,
       aforo     INT NULL,
+      zonas     JSON NULL,
       borrado_at DATETIME NULL
     ) COLLATE=utf8mb4_0900_as_ci;
   `);
@@ -91,12 +92,26 @@ async function abrir() {
       ['e', 'Bogota',   'ana',  '2026-04-01', 5,    null],
       ['f', 'Bogotá',   'ana',  '2026-05-01', 7,    null],
       ['g', 'BOGOTÁ',   'ana',  '2026-06-01', 9,    null],
-    ]) await conexion.execute('INSERT INTO eventos VALUES (?,?,?,?,?,?)', fila);
+    ]) await conexion.execute(
+        'INSERT INTO eventos (id,nombre,owner_id,fecha,aforo,borrado_at) VALUES (?,?,?,?,?,?)', fila);
 
   /* El adaptador habla con `core/db`, así que se le pasa una base que cumple el
      mismo contrato (`consultar`) apuntando a la de pruebas. Es el seam: así no
      hace falta configurar MYSQL_* del proyecto para probar esto. */
-  const base = { consultar: async (sql, params = []) => (await conexion.execute(sql, params))[0] };
+  const base = {
+    consultar: async (sql, params = []) => (await conexion.execute(sql, params))[0],
+    /* Transacción de verdad, no una simulada: lo que el tramo 3 protege —leer
+       antes de borrar, fijar las claves antes de actualizar— sólo vale si el
+       COMMIT y el ROLLBACK son los de MySQL. */
+    transaccion: async (fn) => {
+      await conexion.beginTransaction();
+      try {
+        const r = await fn({ consultar: async (sql, params = []) => (await conexion.execute(sql, params))[0] });
+        await conexion.commit();
+        return r;
+      } catch (e) { try { await conexion.rollback(); } catch { /* conexión muerta */ } throw e; }
+    },
+  };
   pg = require('../core/db/postgrest.js').crear({ base });
 }
 
@@ -262,6 +277,137 @@ test('adaptador contra MySQL de verdad', { skip: SALTAR && 'pon MYSQL_PRUEBAS=1'
     const { data } = await pg.from('eventos').select('id')
       .eq('owner_id', 'ana').is('borrado_at', null).gte('aforo', 7).order('id');
     assert.deepEqual(data.map(f => f.id), ['f', 'g']);
+  });
+
+  /* ── Tramo 3: las escrituras ───────────────────────────────────────── */
+
+  await t.test('insert sin .select() devuelve data null, no una lista vacía', async () => {
+    /* Es lo que hace supabase-js, y hay código que mira `if (data)`. Una lista
+       vacía parecería lo mismo y no lo es. */
+    const { data, error } = await pg.from('eventos').insert({ nombre: 'Nuevo', owner_id: 'juan' });
+    assert.equal(error, null);
+    assert.equal(data, null);
+  });
+
+  await t.test('insert GENERA la clave: el esquema MySQL no la pone', async () => {
+    /* En Postgres las 73 columnas `id` tienen DEFAULT gen_random_uuid(); en el
+       volcado de MySQL son CHAR(36) NOT NULL sin default. 81 de los 83 insert
+       no pasan `id`. Sin esto, `ER_NO_DEFAULT_FOR_FIELD`. */
+    const { data, error } = await pg.from('eventos')
+      .insert({ nombre: 'Con clave', owner_id: 'juan' }).select('id, nombre').single();
+    assert.equal(error, null);
+    assert.match(data.id, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+      'tiene que ser un UUID v4, igual que gen_random_uuid() de Postgres');
+    assert.equal(data.nombre, 'Con clave');
+  });
+
+  await t.test('insert con la clave puesta la respeta', async () => {
+    const { data } = await pg.from('eventos')
+      .insert({ id: 'mio-1', nombre: 'Mío', owner_id: 'juan' }).select('id').single();
+    assert.equal(data.id, 'mio-1');
+  });
+
+  await t.test('insert de varias filas devuelve todas', async () => {
+    const { data, error } = await pg.from('eventos').insert([
+      { id: 'v1', nombre: 'Uno', owner_id: 'z' },
+      { id: 'v2', nombre: 'Dos', owner_id: 'z' },
+    ]).select('id');
+    assert.equal(error, null);
+    assert.deepEqual(data.map(f => f.id).sort(), ['v1', 'v2']);
+  });
+
+  await t.test('insert de filas con columnas distintas LANZA', async () => {
+    /* PostgREST lo rechaza. Rellenar con NULL lo que falte es como se escriben
+       filas a medias sin que nadie se entere. */
+    await assert.rejects(
+      async () => { await pg.from('eventos').insert([{ id: 'x1', nombre: 'A' }, { id: 'x2', aforo: 3 }]); },
+      (e) => e.code === 'PGRST_NO_SOPORTADO');
+  });
+
+  await t.test('un array va a una columna JSON y vuelve como array', async () => {
+    /* Medido: con `execute()` mysql2 3.24.2 ya lo guarda bien, pero con
+       `query()` el mismo array revienta con ER_WRONG_VALUE_COUNT_ON_ROW. El
+       adaptador lo convierte él para que dé igual cuál se use. */
+    const { data, error } = await pg.from('eventos')
+      .insert({ id: 'js-1', nombre: 'Con zonas', zonas: ['vip', 'general'] })
+      .select('zonas').single();
+    assert.equal(error, null);
+    assert.ok(Array.isArray(data.zonas), 'tiene que volver como array de JavaScript');
+    assert.deepEqual(data.zonas, ['vip', 'general']);
+  });
+
+  await t.test('update con .select() relee POR CLAVE, no por el filtro', async () => {
+    /* El fallo que esto evita: actualizar la misma columna por la que se
+       filtra. Releer con el filtro original daría CERO filas —ya ninguna casa—
+       y el código de arriba creería que no se actualizó nada. */
+    await pg.from('eventos').insert([
+      { id: 'u1', nombre: 'A', owner_id: 'mover' },
+      { id: 'u2', nombre: 'B', owner_id: 'mover' },
+    ]);
+
+    const { data, error } = await pg.from('eventos')
+      .update({ owner_id: 'movido' }).eq('owner_id', 'mover').select('id, owner_id');
+
+    assert.equal(error, null);
+    assert.equal(data.length, 2, 'releyó con el filtro viejo y se quedó sin filas');
+    assert.deepEqual(data.map(f => f.owner_id), ['movido', 'movido']);
+  });
+
+  await t.test('update que no casa con nada devuelve lista vacía, sin error', async () => {
+    const { data, error } = await pg.from('eventos')
+      .update({ nombre: 'X' }).eq('id', 'no-existe').select('id');
+    assert.equal(error, null);
+    assert.deepEqual(data, []);
+  });
+
+  await t.test('delete con .select() devuelve lo borrado, no una lista vacía', async () => {
+    /* Después de un DELETE no queda nada que leer: hay que leerlo antes. */
+    await pg.from('eventos').insert({ id: 'del-1', nombre: 'Se va', owner_id: 'q' });
+
+    const { data, error } = await pg.from('eventos').delete().eq('id', 'del-1').select('id, nombre');
+    assert.equal(error, null);
+    assert.deepEqual(data, [{ id: 'del-1', nombre: 'Se va' }]);
+
+    const queda = await pg.from('eventos').select('id').eq('id', 'del-1');
+    assert.deepEqual(queda.data, [], 'tenía que haberse borrado de verdad');
+  });
+
+  await t.test('upsert inserta la primera vez y actualiza la segunda', async () => {
+    const uno = await pg.from('eventos')
+      .upsert({ id: 'up-1', nombre: 'Primera', owner_id: 'u' }, { onConflict: 'id' })
+      .select('nombre').single();
+    assert.equal(uno.data.nombre, 'Primera');
+
+    const dos = await pg.from('eventos')
+      .upsert({ id: 'up-1', nombre: 'Segunda', owner_id: 'u' }, { onConflict: 'id' })
+      .select('nombre').single();
+    assert.equal(dos.error, null);
+    assert.equal(dos.data.nombre, 'Segunda', 'el upsert no actualizó: insertó otra fila o se quedó igual');
+
+    const cuantas = await pg.from('eventos').select('id').eq('id', 'up-1');
+    assert.equal(cuantas.data.length, 1);
+  });
+
+  await t.test('upsert con ignoreDuplicates LANZA', async () => {
+    /* Sería `INSERT IGNORE`, que se traga TODOS los errores recuperables: un
+       texto demasiado largo se corta y una fecha mala se vuelve ceros, en
+       silencio. Cero usos hoy. */
+    await assert.rejects(
+      async () => { await pg.from('eventos').upsert({ id: 'q' }, { ignoreDuplicates: true }); },
+      (e) => e.code === 'PGRST_NO_SOPORTADO');
+  });
+
+  await t.test('una escritura que falla deshace la transacción', async () => {
+    /* El `nombre` es NOT NULL. La fila buena de la misma sentencia no puede
+       quedarse dentro. */
+    const antes = (await pg.from('eventos').select('id')).data.length;
+    const { error } = await pg.from('eventos').insert([
+      { id: 'tx-1', nombre: 'Buena' },
+      { id: 'tx-2', nombre: null },
+    ]).select('id');
+    assert.ok(error, 'tenía que dar error');
+    const despues = (await pg.from('eventos').select('id')).data.length;
+    assert.equal(despues, antes, 'la fila buena se quedó dentro: no hubo rollback');
   });
 
   await t.test('un método no soportado LANZA aunque haya base detrás', async () => {

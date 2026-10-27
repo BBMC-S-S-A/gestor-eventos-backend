@@ -158,7 +158,7 @@ Cada tramo deja algo que se puede probar solo, y ninguno cambia nada mientras
 |---|---|---|---|
 | 1 | El esqueleto: `from`, `select` de columnas, `eq`, `order`, `limit`, `single`/`maybeSingle`, y el **reventar** ante lo no soportado | Contra MySQL real, tabla por tabla | ✅ |
 | 2 | El resto de filtros: `in`, `is`, `neq`, `not`, `gt/gte/lt/lte`, `ilike` (`match`: cero usos) | Idem, caso por caso | ✅ |
-| 3 | Escrituras: `insert`, `update`, `delete`, `upsert` — y el `JSON.stringify` de las 8 columnas de array | Idem | ⬜ |
+| 3 | Escrituras: `insert`, `update`, `delete`, `upsert` — y el `JSON.stringify` de las 8 columnas de array | Idem | ✅ |
 | 4 | `count` y `range`, con la semántica escrita | Comparando contra Postgres | ⬜ |
 | 5 | **Los 66 JOIN embebidos** | Empezando por el de `lib/acceso.js`, con la prueba de permisos en verde | ⬜ |
 | 6 | `.or()` y su gramática | Las cinco formas que hay hoy | ⬜ |
@@ -270,6 +270,78 @@ sabemos** hacer, no para lo que sabemos hacer y da pereza.
 | `like` | En Postgres distingue mayúsculas; en MySQL con cotejo `_ci` **no**. Se comportaría como `ilike` y devolvería de más, en silencio. Cero usos. |
 | `match` | Cero usos medidos. No se escribe lo que nadie usa. |
 | un `not` dentro de otro `not` | PostgREST no lo permite y no hay ninguno. |
+
+---
+
+## 7 · Tramo 3 — las escrituras
+
+`insert`, `update`, `delete` y `upsert`, con `.select()` detrás. Medido:
+**insert 140** (79 con `.select()`), **update 190** (71), **delete 112** (1),
+**upsert 13** (5, y 15 con `onConflict`).
+
+### MySQL no tiene `RETURNING`
+
+156 de esas llamadas piden las filas de vuelta. En Postgres sale gratis; aquí
+hay que ir a buscarlas, y hacerlo mal es fácil **de maneras que no dan error**:
+
+| | Lo que pasaría |
+|---|---|
+| Releer con el mismo filtro tras un `UPDATE` | Si el update tocó la columna del filtro, **cero filas** donde había dos |
+| Leer tras un `DELETE` | **Cero filas**, siempre |
+
+Por eso cada escritura con `.select()` va **dentro de una transacción** y se
+apunta las claves antes de tocar nada:
+
+- **insert** → se generan las claves, se inserta, se lee por esas claves.
+- **update** → se leen las claves que casan, se actualiza **por esas claves**,
+  se relee. El filtro se evalúa una sola vez.
+- **delete** → se leen las filas **enteras antes** de borrar, y se devuelven ésas.
+
+Sin `.select()` no hay transacción ni relectura: son 61 inserciones y 111
+borrados que no la piden, y supabase-js devuelve `{ data: null }`.
+
+### El hallazgo gordo: los `id` no se generan solos
+
+| | |
+|---|---|
+| Postgres | **73 de 77** columnas `id` tienen `DEFAULT gen_random_uuid()` |
+| Volcado MySQL | las **70** columnas `id` son `CHAR(36) NOT NULL`, **sin DEFAULT y sin AUTO_INCREMENT** |
+| El código | de los 83 `insert` con objeto literal, **81 no pasan `id`** |
+
+O sea que, tal cual, **81 inserciones darían `ER_NO_DEFAULT_FOR_FIELD`.** Es un
+fallo ruidoso —de los buenos—, pero sería un fallo.
+
+Se arregla en el adaptador y no en el esquema a propósito:
+`crypto.randomUUID()` da un **UUID v4**, igual que `gen_random_uuid()`;
+`DEFAULT (UUID())` de MySQL daría un **v1**, que lleva dentro la MAC de la
+máquina y la hora. Y de paso resuelve lo del `RETURNING`: para releer la fila
+hay que conocer su clave de todos modos.
+
+> **Ojo para quien escriba en MySQL sin pasar por el adaptador** (un script, una
+> carga manual): ahí el `id` sí hay que ponerlo a mano.
+
+### El `JSON.stringify` de las columnas de array
+
+Medido contra **mysql2 3.24.2**, y no es lo que decía `NOTAS-ESQUEMA`:
+
+| | array crudo a una columna JSON |
+|---|---|
+| `execute()` (lo que usa `core/db/mysql.js`) | **funciona** |
+| `query()` | revienta con `ER_WRONG_VALUE_COUNT_ON_ROW` |
+
+Depender de cuál de los dos se usa es el tipo de detalle que nadie recuerda dos
+meses después, así que el adaptador lo convierte él y queda igual con los dos.
+Las fechas y los `Buffer` **no** se tocan: pasarlos por `JSON.stringify` los
+convertiría en texto dentro de una columna `DATETIME`.
+
+### Lo que lanza a propósito
+
+| | Por qué |
+|---|---|
+| filas de un `insert` con columnas distintas | PostgREST lo rechaza. Rellenar con NULL lo que falte es como se escriben filas a medias. |
+| `upsert` con `ignoreDuplicates` | Sería `INSERT IGNORE`, que se traga **todos** los errores recuperables: un texto largo se corta y una fecha mala se vuelve ceros, en silencio. Cero usos. |
+| `.select()` sobre una tabla sin clave primaria | No hay forma de volver a encontrar lo escrito. |
+| `throwOnError` | Devolverse a sí mismo sería mentir a medias. Cero usos. |
 
 ### Lo que NO está cableado todavía
 

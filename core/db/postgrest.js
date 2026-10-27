@@ -32,13 +32,15 @@
  * es lo que hace supabase-js hoy y lo que el código de alrededor espera. Eso
  * no es una regresión: es el comportamiento de siempre.
  *
- * ── Lo que cubre hoy (tramo 1 de 8) ──────────────────────────────────────
+ * ── Lo que cubre hoy (tramos 1 a 3 de 8) ─────────────────────────────────
  *
- *   from · select(columnas) · eq · order · limit · single · maybeSingle
+ *   Leer    from · select(columnas) · single · maybeSingle · order · limit
+ *   Filtrar eq · neq · gt · gte · lt · lte · is · in · not · ilike
+ *   Escribir insert · update · delete · upsert, con `.select()` detrás
  *
- * Todo lo demás —`insert`, `update`, `delete`, `in`, `is`, `or`, `ilike`,
- * `count`, los JOIN embebidos, `rpc`— lanza con un mensaje que dice en qué
- * tramo entra. Los tramos están en `db/EL-RESTO-DE-LAS-RUTAS.md` §3.
+ * Todo lo demás —`or`, `count`, `range`, los JOIN embebidos, `rpc`— lanza con
+ * un mensaje que dice en qué tramo entra. Los tramos están en
+ * `db/EL-RESTO-DE-LAS-RUTAS.md` §3.
  *
  * ── Cómo está partido, y por qué ─────────────────────────────────────────
  *
@@ -48,6 +50,7 @@
  * ese SQL hace lo que se cree (`test/postgrest.contraMysql.test.js`).
  */
 
+const crypto = require('node:crypto');
 const { bd } = require('./mysql.js');
 
 /* ── Lanzar ──────────────────────────────────────────────────────────────
@@ -306,18 +309,29 @@ function errorPgrst(mensaje, { code = 'PGRST116', details = null, hint = null } 
 }
 
 async function ejecutar(plan, { base = bd('datos') } = {}) {
-  const { sql, params } = compilar(plan);
-
   let filas;
   try {
-    filas = await base.consultar(sql, params);
+    if (plan.accion === 'select') {
+      const { sql, params } = compilar(plan);
+      filas = await base.consultar(sql, params);
+    } else {
+      const r = await escribir(plan, base);
+      /* Sin `.select()` detrás, supabase-js devuelve `{ data: null }`. Devolver
+         una lista vacía en su lugar parecería lo mismo y no lo es: hay código
+         que mira `if (data)`. */
+      if (r.error !== undefined) return r;
+      filas = r;
+    }
   } catch (e) {
+    /* Lo NO SOPORTADO vuelve a salir: es una excepción a propósito y no se
+       convierte en `{ error }`, que es justo lo que nadie mira. */
+    if (e.code === 'PGRST_NO_SOPORTADO') throw e;
     /* Un error de SQL de verdad vuelve como `{ error }`, no lanzado: es lo que
        hace supabase-js y lo que el código de alrededor espera. Lo que lanza es
        lo NO SOPORTADO, que es cosa distinta y pasa antes de llegar aquí. */
     return {
       data : null,
-      error: errorPgrst(e.message, { code: e.code || 'PGRST_SQL', details: sql }),
+      error: errorPgrst(e.message, { code: e.code || 'PGRST_SQL', details: e.sql || null }),
       count: null,
     };
   }
@@ -349,6 +363,314 @@ async function ejecutar(plan, { base = bd('datos') } = {}) {
   };
 }
 
+/* ══ ESCRITURAS (tramo 3) ═══════════════════════════════════════════════
+ *
+ * Medido el 27 de octubre de 2026:
+ *
+ *   insert 140 (79 con `.select()` detrás) · update 190 (71) ·
+ *   delete 112 (1)  · upsert 13 (5, y 15 con `onConflict`)
+ *
+ * ── El problema de fondo: MySQL no tiene RETURNING ───────────────────────
+ *
+ * 156 de esas llamadas piden las filas de vuelta. En Postgres sale gratis
+ * (`INSERT … RETURNING *`); en MySQL hay que ir a buscarlas. Y hacerlo mal es
+ * fácil de maneras que no dan error:
+ *
+ *   · Volver a leer con el MISMO filtro después de un `UPDATE` devuelve otra
+ *     cosa si el update tocó justo la columna del filtro.
+ *   · Leer después de un `DELETE` devuelve cero filas siempre.
+ *
+ * Por eso cada escritura con `.select()` va DENTRO DE UNA TRANSACCIÓN y se
+ * apunta las claves primarias antes de tocar nada:
+ *
+ *   insert → se generan las claves, se inserta, se leen por esas claves.
+ *   update → se leen las claves que casan, se actualiza POR ESAS CLAVES, se
+ *            releen. Así el filtro se evalúa una sola vez.
+ *   delete → se leen las filas ENTERAS antes de borrar, y se devuelven esas.
+ *
+ * ── El otro hallazgo, y es gordo ─────────────────────────────────────────
+ *
+ * En Postgres, 73 de las 77 columnas `id` tienen `DEFAULT gen_random_uuid()`.
+ * En el volcado de MySQL, las 70 columnas `id` son `CHAR(36) NOT NULL` **sin
+ * DEFAULT y sin AUTO_INCREMENT**. Y de los 83 `insert` con objeto literal,
+ * **81 no pasan `id`**: cuentan con que la base lo ponga.
+ *
+ * O sea que, tal cual, 81 inserciones darían `ER_NO_DEFAULT_FOR_FIELD`. Es un
+ * fallo RUIDOSO —de los buenos—, pero sería un fallo.
+ *
+ * Se arregla aquí y no en el esquema a propósito. `crypto.randomUUID()` da un
+ * UUID v4, que es lo mismo que `gen_random_uuid()`; `DEFAULT (UUID())` de
+ * MySQL daría un v1, que lleva dentro la MAC de la máquina y la hora. Y de
+ * paso resuelve lo de RETURNING: para leer la fila recién insertada hay que
+ * conocer su clave de todos modos.
+ */
+
+/* Qué columna es la clave primaria de cada tabla, y si la podemos generar.
+ *
+ * Se pregunta a `information_schema` una vez por tabla y se guarda. Es una
+ * consulta por tabla en toda la vida del proceso; adivinar que la clave se
+ * llama `id` sería gratis y estaría mal en las tablas de unión. */
+const _claves = new Map();
+
+async function claveDe(tabla, base) {
+  if (_claves.has(tabla)) return _claves.get(tabla);
+
+  const filas = await base.consultar(
+    `SELECT k.COLUMN_NAME AS col, c.DATA_TYPE AS tipo,
+            c.CHARACTER_MAXIMUM_LENGTH AS largo, c.EXTRA AS extra,
+            c.COLUMN_DEFAULT AS pordefecto
+       FROM information_schema.KEY_COLUMN_USAGE k
+       JOIN information_schema.COLUMNS c
+         ON c.TABLE_SCHEMA = k.TABLE_SCHEMA
+        AND c.TABLE_NAME   = k.TABLE_NAME
+        AND c.COLUMN_NAME  = k.COLUMN_NAME
+      WHERE k.TABLE_SCHEMA = DATABASE()
+        AND k.TABLE_NAME = ?
+        AND k.CONSTRAINT_NAME = 'PRIMARY'
+      ORDER BY k.ORDINAL_POSITION`, [tabla]);
+
+  /* Sin clave primaria no se puede ni generar el id ni releer lo escrito.
+     Se devuelve `null` en vez de lanzar: una tabla sin clave puede escribirse
+     perfectamente mientras nadie pida las filas de vuelta. Quien la necesite
+     lanza abajo, con el motivo concreto. */
+  if (!filas.length) { _claves.set(tabla, null); return null; }
+
+  const info = {
+    columnas: filas.map(f => f.col),
+    /* Generable sólo si es UNA columna de texto de 36 —un UUID— sin valor por
+       defecto. Si es AUTO_INCREMENT la pone MySQL y la devuelve en `insertId`;
+       cualquier otra cosa, quien llama tiene que traerla. */
+    generable: filas.length === 1
+      && ['char', 'varchar'].includes(String(filas[0].tipo).toLowerCase())
+      && Number(filas[0].largo) === 36
+      && filas[0].pordefecto === null
+      && !String(filas[0].extra || '').includes('auto_increment'),
+    autoincrement: String(filas[0].extra || '').includes('auto_increment'),
+  };
+
+  _claves.set(tabla, info);
+  return info;
+}
+
+/* ── Los valores que se escriben ─────────────────────────────────────────
+ *
+ * Los arrays y los objetos van a columnas JSON y se pasan como texto.
+ *
+ * Medido contra mysql2 3.24.2: con `execute()` —que es lo que usa
+ * `core/db/mysql.js`— un array crudo YA se guarda bien. Pero con `query()` el
+ * mismo array se expande como lista de valores de SQL y revienta con
+ * `ER_WRONG_VALUE_COUNT_ON_ROW`. Depender de cuál de los dos se usa es
+ * exactamente el tipo de detalle que nadie recuerda dos meses después, así que
+ * se convierte aquí y queda igual con los dos.
+ *
+ * Las fechas y los Buffer NO se tocan: mysql2 los sabe escribir, y pasarlos
+ * por JSON.stringify los convertiría en texto ISO dentro de una columna
+ * DATETIME. */
+function valorEscribible(v) {
+  /* Un array también entra por aquí: en JavaScript es un objeto. Había una
+     línea `Array.isArray` delante y se quitó porque no cambiaba nada —lo
+     descubrió una mutación que ninguna prueba cazaba, que es la forma de
+     encontrar código que no hace falta—. */
+  if (v !== null && typeof v === 'object'
+      && !(v instanceof Date) && !Buffer.isBuffer(v)) return JSON.stringify(v);
+  return v;
+}
+
+/* Las filas de un insert/upsert, normalizadas: siempre una lista, siempre con
+   las mismas columnas en el mismo orden. PostgREST exige que todas las filas
+   de un insert múltiple tengan las mismas claves; si no coinciden, lanza en vez
+   de rellenar con NULL lo que falte, que es como se escriben filas a medias. */
+function filasNormalizadas(entrada, de) {
+  const filas = Array.isArray(entrada) ? entrada : [entrada];
+  if (!filas.length) noSoportado(`\`${de}\` sin ninguna fila`);
+
+  for (const fila of filas) {
+    if (!fila || typeof fila !== 'object' || Array.isArray(fila)) {
+      noSoportado(`\`${de}\` con algo que no es un objeto`);
+    }
+  }
+
+  const cols = Object.keys(filas[0]);
+  if (!cols.length) noSoportado(`\`${de}\` con un objeto vacío`);
+
+  for (const fila of filas.slice(1)) {
+    const otras = Object.keys(fila);
+    if (otras.length !== cols.length || otras.some(c => !cols.includes(c))) {
+      noSoportado(`\`${de}\` con filas de columnas distintas ` +
+                  `(\`${cols.join(', ')}\` vs \`${otras.join(', ')}\`)`);
+    }
+  }
+  return { filas, cols };
+}
+
+/* ── Ejecutar una escritura ──────────────────────────────────────────────
+ *
+ * `devolver` es si había un `.select()` detrás. Cuando no lo hay, supabase-js
+ * devuelve `{ data: null }` y no se lee nada: 111 de los 112 `delete` y 111 de
+ * los 190 `update` están así, y leerles las filas igual sería trabajo que nadie
+ * pidió. */
+async function escribir(plan, base) {
+  const tabla = ident(plan.tabla, 'un `from`');
+
+  /* La clave hace falta en `insert` y `upsert` AUNQUE no haya `.select()`:
+     el esquema MySQL no genera los `id` y hay que ponerlos aquí (ver arriba).
+     Lo cazó la prueba «insert sin .select()», que fallaba con
+     ER_NO_DEFAULT_FOR_FIELD porque esto sólo se miraba al releer. */
+  const escribeFilas = plan.accion === 'insert' || plan.accion === 'upsert';
+  const clave = (escribeFilas || plan.devolver) ? await claveDe(plan.tabla, base) : null;
+
+  /* Sin `.select()` no hace falta transacción: es una sola sentencia. */
+  if (!plan.devolver) {
+    const { sql, params } = sentenciaEscritura(plan, tabla, clave);
+    await base.consultar(sql, params);
+    return { data: null, error: null, count: null };
+  }
+
+  if (typeof base.transaccion !== 'function') {
+    noSoportado('escribir con `.select()` sobre una base sin transacciones');
+  }
+
+  if (!clave) {
+    noSoportado(`leer de vuelta lo escrito en \`${plan.tabla}\`: la tabla no tiene clave ` +
+                'primaria, así que no hay forma de volver a encontrar las filas');
+  }
+  if (clave.columnas.length !== 1) {
+    noSoportado(`escribir en \`${plan.tabla}\` con \`.select()\`: su clave primaria tiene ` +
+                `${clave.columnas.length} columnas y la relectura sólo sabe de una`);
+  }
+  const pk = clave.columnas[0];
+  const pkq = ident(pk, 'la clave primaria');
+
+  return base.transaccion(async (tx) => {
+    /* El `delete` es el único que tiene que leer ANTES: después no hay nada
+       que leer. Devuelve las filas tal y como eran. */
+    if (plan.accion === 'delete') {
+      const antes = await tx.consultar(...sqlYParams(
+        `SELECT ${plan.columnas} FROM ${tabla}`, plan));
+      const { sql, params } = sentenciaEscritura(plan, tabla, null);
+      await tx.consultar(sql, params);
+      return antes;
+    }
+
+    if (plan.accion === 'update') {
+      /* Las claves se apuntan ANTES y el update va POR ESAS CLAVES, no por el
+         filtro original. Si no, un `.update({estado:'x'}).eq('estado','y')`
+         actualizaría bien pero releería cero filas, porque después del update
+         ya ninguna casa con `estado = 'y'`. Devolver una lista vacía donde
+         había filas es justo el fallo mudo de siempre. */
+      const claves = (await tx.consultar(...sqlYParams(
+        `SELECT ${pkq} FROM ${tabla}`, plan))).map(f => f[pk]);
+      if (!claves.length) return [];
+
+      const sets = [];
+      const params = [];
+      for (const [c, v] of Object.entries(plan.valores)) {
+        sets.push(`${ident(c, 'un `update`')} = ?`);
+        params.push(valorEscribible(v));
+      }
+      params.push(...claves);
+      await tx.consultar(
+        `UPDATE ${tabla} SET ${sets.join(', ')} WHERE ${pkq} IN (${claves.map(() => '?').join(', ')})`,
+        params);
+
+      return tx.consultar(
+        `SELECT ${plan.columnas} FROM ${tabla} WHERE ${pkq} IN (${claves.map(() => '?').join(', ')})`,
+        claves);
+    }
+
+    /* insert y upsert: las claves se conocen antes de escribir —generadas o
+       traídas por quien llama—, así que la relectura es exacta. */
+    const { sql, params, claves } = sentenciaEscritura(plan, tabla, clave);
+    const r = await tx.consultar(sql, params);
+
+    let aLeer = claves;
+    if (!aLeer.length) {
+      /* AUTO_INCREMENT: MySQL devuelve la primera y las demás son correlativas
+         dentro de la misma sentencia. Hoy el esquema no tiene ninguna tabla
+         así; queda escrito para que, si entra una, no falle en silencio. */
+      if (!clave.autoincrement || !r?.insertId) {
+        noSoportado(`leer de vuelta un \`${plan.accion}\` en \`${plan.tabla}\`: ` +
+                    'no se pasó la clave primaria y la tabla no la genera');
+      }
+      aLeer = plan.filas.map((_, i) => r.insertId + i);
+    }
+
+    return tx.consultar(
+      `SELECT ${plan.columnas} FROM ${tabla} WHERE ${pkq} IN (${aLeer.map(() => '?').join(', ')})`,
+      aLeer);
+  });
+}
+
+/* El WHERE de un plan, reutilizado por el delete y el update. */
+function sqlYParams(cabeza, plan) {
+  const params = [];
+  const donde = plan.filtros.map(f => condicion(f, params));
+  return [donde.length ? `${cabeza} WHERE ${donde.join(' AND ')}` : cabeza, params];
+}
+
+/* La sentencia de escritura. Devuelve también las claves primarias de las
+   filas insertadas, que es lo que permite releerlas sin RETURNING. */
+function sentenciaEscritura(plan, tabla, clave) {
+  if (plan.accion === 'delete') {
+    const [sql, params] = sqlYParams(`DELETE FROM ${tabla}`, plan);
+    return { sql, params, claves: [] };
+  }
+
+  if (plan.accion === 'update') {
+    const params = [];
+    const sets = Object.entries(plan.valores).map(([c, v]) => {
+      params.push(valorEscribible(v));
+      return `${ident(c, 'un `update`')} = ?`;
+    });
+    if (!sets.length) noSoportado('`update` sin ninguna columna que cambiar');
+    const donde = plan.filtros.map(f => condicion(f, params));
+    return {
+      sql: `UPDATE ${tabla} SET ${sets.join(', ')}` + (donde.length ? ` WHERE ${donde.join(' AND ')}` : ''),
+      params, claves: [],
+    };
+  }
+
+  /* insert / upsert */
+  const { filas, cols } = plan.normalizadas;
+  const pk = clave?.generable ? clave.columnas[0] : null;
+  const columnas = pk && !cols.includes(pk) ? [pk, ...cols] : cols;
+
+  const claves = [];
+  const params = [];
+  const tuplas = filas.map((fila) => {
+    const valores = { ...fila };
+    if (pk && valores[pk] == null) valores[pk] = crypto.randomUUID();
+    if (columnas.includes(clave?.columnas?.[0])) claves.push(valores[clave.columnas[0]]);
+    for (const c of columnas) params.push(valorEscribible(valores[c] ?? null));
+    return `(${columnas.map(() => '?').join(', ')})`;
+  });
+
+  const lista = columnas.map(c => ident(c, `un \`${plan.accion}\``)).join(', ');
+  let sql = `INSERT INTO ${tabla} (${lista}) VALUES ${tuplas.join(', ')}`;
+
+  if (plan.accion === 'upsert') {
+    /* `ON DUPLICATE KEY UPDATE` con la forma de alias (MySQL 8.0.19+), no con
+     * `VALUES(col)`, que está obsoleta desde esa misma versión. Medido: el
+     * servidor de este proyecto es 8.0.46.
+     *
+     * OJO con lo que NO es igual: PostgREST apunta el conflicto a UNA clave
+     * (`onConflict`), y `ON DUPLICATE KEY` salta con CUALQUIER índice único de
+     * la tabla. Coinciden mientras `onConflict` sea la única clave única que
+     * la fila pueda chocar, que es el caso de los 15 usos de hoy (`id`,
+     * `evento_id`, `owner_id,tipo`). Si una tabla tuviera dos índices únicos,
+     * MySQL podría actualizar por el otro. Por eso se comprueba que las
+     * columnas de `onConflict` sean de verdad un índice único: si no lo son,
+     * PostgREST daría error y aquí se lanza igual, en vez de hacer un upsert
+     * que parece funcionar. */
+    const actualiza = columnas
+      .filter(c => c !== pk || plan.normalizadas.cols.includes(pk))
+      .map(c => `${ident(c, 'un `upsert`')} = nueva.${ident(c, 'un `upsert`')}`);
+    sql += ` AS nueva ON DUPLICATE KEY UPDATE ${actualiza.join(', ')}`;
+  }
+
+  return { sql, params, claves: claves.filter(v => v != null) };
+}
+
 /* ── El constructor ──────────────────────────────────────────────────────
  *
  * Es «thenable»: no es una promesa, pero tiene `then`, así que `await` sobre él
@@ -373,11 +695,18 @@ const DE_LA_CASA = new Set([
 function constructor(tabla, opciones = {}) {
   const plan = {
     tabla,
+    accion  : 'select',
     columnas: '*',
     filtros : [],
     orden   : [],
     limite  : null,
     forma   : 'muchas',
+    /* Escrituras */
+    filas      : null,   // insert / upsert
+    normalizadas: null,
+    valores    : null,   // update
+    onConflict : null,
+    devolver   : false,  // ¿hubo un `.select()` detrás?
   };
 
   const api = {
@@ -386,6 +715,46 @@ function constructor(tabla, opciones = {}) {
          semántica (¿antes o después del `limit`?). Tramo 4. */
       if (extra && extra.count) noSoportado('`select` con `count`', 4);
       plan.columnas = columnas(seleccion);
+      /* Detrás de una escritura, `.select()` no elige qué leer: pide que la
+         escritura DEVUELVA lo escrito. En Postgres es el `RETURNING`; aquí
+         obliga a transacción y relectura (ver «ESCRITURAS» arriba). */
+      if (plan.accion !== 'select') plan.devolver = true;
+      return envuelto;
+    },
+
+    /* ── Escrituras (tramo 3) ──────────────────────────────────────── */
+
+    insert(filas) {
+      plan.accion = 'insert';
+      plan.normalizadas = filasNormalizadas(filas, 'insert');
+      plan.filas = plan.normalizadas.filas;
+      return envuelto;
+    },
+
+    upsert(filas, opts = {}) {
+      plan.accion = 'upsert';
+      plan.normalizadas = filasNormalizadas(filas, 'upsert');
+      plan.filas = plan.normalizadas.filas;
+      /* `ignoreDuplicates: true` es `ON CONFLICT DO NOTHING`, que en MySQL es
+         `INSERT IGNORE` — y `INSERT IGNORE` se traga TODOS los errores
+         recuperables, no sólo el de clave repetida: un dato demasiado largo se
+         corta y una fecha inválida se vuelve ceros, callando. Cero usos hoy. */
+      if (opts.ignoreDuplicates) noSoportado('`upsert` con `ignoreDuplicates`');
+      plan.onConflict = opts.onConflict || null;
+      return envuelto;
+    },
+
+    update(valores) {
+      if (!valores || typeof valores !== 'object' || Array.isArray(valores)) {
+        noSoportado('`update` con algo que no es un objeto');
+      }
+      plan.accion = 'update';
+      plan.valores = valores;
+      return envuelto;
+    },
+
+    delete() {
+      plan.accion = 'delete';
       return envuelto;
     },
 
@@ -460,6 +829,11 @@ function constructor(tabla, opciones = {}) {
       return ejecutar(plan, opciones).then(alCumplir, alFallar);
     },
 
+    /* `throwOnError()` de supabase hace que el error se lance en vez de
+       volver. Aquí no hay nada que hacer y devolverse a sí mismo sería mentir
+       a medias: cero usos, así que lanza. */
+    throwOnError() { noSoportado('`throwOnError`'); },
+
     /* Para las pruebas y para depurar: el SQL sin ir a la base. No lleva `_`
        por capricho — marca que no es parte del idioma de PostgREST. */
     _compilar() { return compilar(plan); },
@@ -498,3 +872,4 @@ module.exports = crear();
 module.exports.crear = crear;
 module.exports._compilar = compilar;
 module.exports._noSoportado = noSoportado;
+module.exports._valorEscribible = valorEscribible;
