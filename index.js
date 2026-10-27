@@ -50,14 +50,34 @@ app.get('/', publica('Portada de la API: dice qué es esto y qué endpoints hay.
   });
 });
 
+/* Se declara aquí arriba porque `/health` y los dos interruptores de abajo
+   lo miran, y leerlo dos veces invita a que uno de los dos se quede viejo. */
+const configPropia = require('./core/config');
+
 app.get('/health', publica('Latido del servidor: lo consultan el panel de cPanel y cualquier vigilante externo. Trae el commit desplegado para poder comparar Render contra cPanel sin entrar a mirar archivos.'), (_req, res) => {
   const { commitDesplegado, commitCorto } = require('./lib/version.js');
-  res.json({
+  const cuerpo = {
     status: 'ok',
     timestamp: new Date().toISOString(),
     commit: commitDesplegado(),
     commit_corto: commitCorto(),
-  });
+  };
+
+  /* Los correos que no salieron, sólo con la identidad propia encendida.
+   *
+   * Va aquí porque `/health` es lo que se mira desde fuera, y un correo que no
+   * sale no se nota por ningún otro lado: la pantalla contesta «te llegará un
+   * enlace» aunque no haya salido —contestar distinto delataría qué
+   * direcciones tienen cuenta—. Si este número sube, hay gente esperando un
+   * enlace que no va a llegar.
+   *
+   * No cambia el `status`: la aplicación sigue viva y tirarla por esto dejaría
+   * fuera a todo el mundo para proteger a unos pocos. */
+  if (configPropia.AUTH_PROPIA) {
+    cuerpo.correos_fallidos = require('./modules/auth').fallosDeCorreo();
+  }
+
+  res.json(cuerpo);
 });
 
 /* ── Identidad propia ──────────────────────────────────────────────────────
@@ -70,10 +90,20 @@ app.get('/health', publica('Latido del servidor: lo consultan el panel de cPanel
    se carga el módulo, ni se abre conexión a MySQL. El mismo interruptor existe
    en el frontend (`VITE_AUTH_PROPIA`) y los dos tienen que moverse a la vez.
    Ver CONFIGURAR.md. */
-const configPropia = require('./core/config');
 if (configPropia.AUTH_PROPIA) {
-  app.use('/auth', require('./modules/auth').rutas);
+  const auth = require('./modules/auth');
+  app.use('/auth', auth.rutas);
   console.log('[auth] identidad propia montada en /auth');
+
+  /* Comprobar que se puede MANDAR CORREO ahora, y no cuando alguien olvide su
+     contraseña — igual que el almacén se comprueba al arrancar y no cuando
+     alguien sube una foto.
+     Con la identidad propia, el correo deja de ser un adorno: es el único
+     camino de vuelta para quien entra con contraseña. Si esto falla, esa gente
+     se queda fuera y la pantalla les dice que el enlace va en camino. */
+  auth.comprobarCorreo()
+    .then((r) => { if (r.ok) console.log(`[auth] el correo sale: ${r.mensaje}`); })
+    .catch((e) => console.error(`[auth] no se pudo comprobar el correo: ${e.message}`));
 }
 
 /* ── Almacén propio ────────────────────────────────────────────────────────

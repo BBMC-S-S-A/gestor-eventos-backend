@@ -420,7 +420,38 @@ es normal (quien tenía contraseña y pulsa Google). **Ochenta y dos en una
 hora significa que el `sub` cambió** — la gente entra igual, por el correo
 verificado, pero hay que saberlo.
 
-### 6.2 · El backend
+### 6.2 · 🚦 El correo, ANTES de encender la identidad
+
+Con la identidad propia, el correo deja de ser un adorno: es **el único camino
+de vuelta** para quien entra con contraseña. Medido contra producción el
+27-oct: **14 personas**. Los otros 82 entran con Google y no dependen de esto.
+
+Si el SMTP está mal, la pantalla de «olvidé mi contraseña» contesta *«te
+llegará un enlace»* igual —contestar distinto delataría qué direcciones tienen
+cuenta— y **el enlace no sale**. Esas 14 personas se quedan fuera sin que nadie
+se entere.
+
+Ponga en cPanel → *Setup Node.js App* → *Environment variables*:
+
+```
+CPANEL_SMTP_HOST=mail.gestekeventost.dpdns.org
+CPANEL_SMTP_PORT=465
+CPANEL_SMTP_USER=no-responder@gestekeventost.dpdns.org
+CPANEL_SMTP_PASS=…
+```
+
+Y compruébelo **antes** de tocar `AUTH_PROPIA`:
+
+```bash
+node scripts/probar-smtp.js
+```
+
+| Resultado | Qué hacer |
+|---|---|
+| Conecta y manda | ✅ Siga al 6.3 |
+| Falla | 🛑 **PARE.** No encienda `AUTH_PROPIA` hasta arreglarlo. El mensaje dice qué falta |
+
+### 6.3 · El backend
 
 En cPanel → *Setup Node.js App* → *Environment variables*:
 
@@ -431,7 +462,26 @@ AUTH_PROPIA=true
 Y **reiniciar la aplicación** (Passenger lee las variables al reiniciar, no al
 guardarlas).
 
-**Tiene que salir en el log:** `[auth] identidad propia montada en /auth`
+**Tienen que salir en el log las DOS líneas:**
+
+```
+[auth] identidad propia montada en /auth
+[auth] el correo sale: Conexión correcta con mail.…:465
+```
+
+Si en vez de la segunda sale `[auth][CORREO] NO se puede mandar correo`,
+apague `AUTH_PROPIA` y vuelva al 6.2: con esa línea en el log, quien olvide su
+contraseña no puede recuperarla.
+
+**Y durante la primera hora, mire esto:**
+
+```bash
+curl -s https://api.gestekeventost.dpdns.org/health | grep -o '"correos_fallidos":{[^}]*}'
+```
+
+`total` tiene que quedarse en 0. Si sube, hay gente esperando un enlace que no
+va a llegar, y en el log del cPanel sale `[auth][CORREO-NO-SALIO]` con a quién
+iba — que es lo único que permite avisarles por otro medio.
 
 ```bash
 curl -s https://api.gestekeventost.dpdns.org/auth/login \
