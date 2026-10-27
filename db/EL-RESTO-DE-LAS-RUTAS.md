@@ -663,15 +663,53 @@ informe marcaría diferencias que no existen. Con un embebido por consulta y
 cincuenta filas, eso es un informe inservible: o sea, uno que se acaba
 ignorando.
 
-### Lo que NO está cableado todavía
+### Ya está cableado
 
-`lib/supabase.js` **sigue devolviendo el cliente de Supabase siempre.** El
-cambio de la cabecera de este documento —
+`lib/supabase.js` es la costura:
 
 ```js
-module.exports = config.DATOS_PROPIOS ? require('../core/db/postgrest.js') : clienteSupabase;
+if (config.DATOS_PROPIOS) module.exports = require('../core/db/postgrest.js');
+else                      module.exports = require('./supabaseCliente.js');
 ```
 
-— se hace al final, cuando los ocho tramos estén. Cablearlo ahora no rompería
-nada (la bandera está apagada), pero dejaría escrito que el adaptador está
-listo cuando le faltan siete tramos.
+Las 1.152 llamadas no se tocaron. **Volver atrás es apagar la bandera**: no hay
+migración de código que deshacer.
+
+### Lo que hubo que separar para poder cablearlo
+
+El login y los comparadores **no pueden pasar por la costura**:
+
+| Quién | Por qué |
+|---|---|
+| `middleware/auth.js` | Llama a `supabase.auth.getUser()` mientras `AUTH_PROPIA` esté apagada. Por la costura, encender `DATOS_PROPIOS` dejaría **sin login todas las peticiones**: el adaptador lanza ahí a propósito. |
+| `comparar-consultas.js` y `comparar-bases.js` | Por la costura compararían **el adaptador contra sí mismo** y dirían que todo cuadra. El informe más peligroso de los tres. |
+
+Los tres piden **`lib/supabaseCliente.js`**, que es el cliente de verdad y
+siempre el de verdad. Una prueba comprueba que nadie más lo pide a sus
+espaldas: una ruta que lo hiciera seguiría leyendo de Supabase el día del
+corte mientras el resto lee de MySQL, **sin un solo error**.
+
+### El cliente de verdad se crea tarde
+
+Antes se creaba al importar y hacía `process.exit(1)` si faltaban las
+variables. Con las tres banderas encendidas Supabase ya no hará falta, y un
+`exit` al arrancar dejaría la aplicación sin levantar por una variable que ya
+nadie usa. Ahora se crea en el primer uso y lanza ahí, con el mismo mensaje.
+
+> El Proxy que lo envuelve **admite escritura**, y eso no es un adorno: varias
+> pruebas sustituyen `supabase.from` por una función falsa. Con un Proxy de
+> sólo lectura la asignación se perdía y la prueba salía a la red de verdad —
+> `fetch failed` donde debía haber una función falsa. Lo descubrió eso mismo.
+
+---
+
+## 14 · Lo que queda para el corte
+
+| | |
+|---|---|
+| El adaptador, los 8 tramos | ✅ |
+| El cableado de `DATOS_PROPIOS` | ✅ |
+| Los 5 subidores del frontend (`ARCHIVOS_PROPIOS`) | ⬜ |
+| Los correos desde cPanel (recuperar contraseña — 14 personas) | ⬜ |
+| Las credenciales MySQL del cPanel | ⬜ |
+| El día del corte: cargar los datos y pasar los **dos** comparadores | ⬜ |

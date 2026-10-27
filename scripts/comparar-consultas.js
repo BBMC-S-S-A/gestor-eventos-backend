@@ -64,7 +64,10 @@ const { normalizar, ordenarClaves } = require('./comparar-bases.js');
 /* Los dos lados se cargan tarde, igual que en `comparar-bases.js`: así este
    archivo se puede requerir desde una prueba sin exigir ninguna variable. */
 const lados = {
-  get postgrest() { return require('../lib/supabase.js'); },
+  /* El cliente DE VERDAD. Si cogiera la costura con `DATOS_PROPIOS`
+     encendida, este script compararía el adaptador CONTRA SÍ MISMO y diría
+     que todo cuadra — el informe más peligroso de todos. */
+  get postgrest() { return require('../lib/supabaseCliente.js'); },
   get adaptador() { return require('../core/db/postgrest.js'); },
 };
 
