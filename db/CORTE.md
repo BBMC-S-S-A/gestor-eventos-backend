@@ -335,6 +335,100 @@ mal o un embebido volvió como lista en vez de objeto. El primero mira la
 carga; éste mira el adaptador.
 
 ---
+### 4.5 · 🚦 Encender `DATOS_PROPIOS`
+
+Esta sección faltaba. El §6 cuenta cómo encender la identidad y el §7 los
+archivos, pero el interruptor de los datos —el que de verdad cambia de motor
+las 1.152 llamadas— no tenía el suyo.
+
+#### Primero: esta bandera NO se parece a las otras dos
+
+| | Si se apaga después |
+|---|---|
+| `AUTH_PROPIA` | las cuentas siguen en Supabase, intactas |
+| `ARCHIVOS_PROPIOS` | los archivos siguen en Supabase, intactos |
+| **`DATOS_PROPIOS`** | **lo escrito mientras estuvo encendida se queda en MySQL** |
+
+`lib/supabase.js` devuelve un motor **o** el otro, nunca los dos. Con la
+bandera encendida, cada boleta vendida, cada ingreso por la puerta y cada
+cambio de evento se escribe sólo en MySQL, y Supabase no se entera.
+
+Devolverse no es imposible —se migra al revés— pero no es quitar una
+variable. **Elija una ventana con poco movimiento.**
+
+#### 1 · Comprobar, desde el servidor
+
+```bash
+node scripts/listo-para-datos.js
+```
+
+No escribe nada. Mira lo que `comprobar-base.js` no mira: las 84 tablas con
+sus 976 columnas y sus 182 claves ajenas, los siete índices que impiden
+duplicados, que las tablas principales tengan filas, que la base esté en
+utf8mb4 y que la conexión lea en UTC.
+
+| Resultado | Qué hacer |
+|---|---|
+| ✅ Todo en orden | siga al 2 |
+| 🛑 Algo por resolver | **PARE.** Cada línea dice qué falta |
+
+#### 2 · Las variables, en cPanel
+
+*Setup Node.js App* → *Environment variables*:
+
+```
+DATOS_PROPIOS=true
+MYSQL_HOST=localhost
+MYSQL_USER=cuenta_usuario
+MYSQL_PASSWORD=…
+MYSQL_DATABASE=cuenta_gestek_auth
+MYSQL_DATOS_DATABASE=cuenta_gestek_datos
+```
+
+Las `MYSQL_*` puede que ya estén si la identidad se configuró antes. La que
+se añade es `DATOS_PROPIOS`. La tabla completa está en `CONFIGURAR.md`.
+
+**Reiniciar la aplicación.** Passenger lee las variables al reiniciar, no al
+guardarlas — igual que en el §6.3.
+
+#### 3 · Que salga en el log
+
+```
+[datos] DATOS_PROPIOS encendido: las consultas van a MySQL (core/db/postgrest.js).
+```
+
+Si no sale, la variable no llegó: no se reinició, o quedó con otro valor
+(sólo `true` y `1` cuentan).
+
+#### 4 · La primera media hora
+
+Lo que hay que mirar no es que no haya errores —el adaptador **lanza** en vez
+de devolver `{ error }`, justo para que se vean— sino que no aparezca esto en
+el log:
+
+```
+PGRST_NO_SOPORTADO
+```
+
+Cada una es una consulta que usa algo que el adaptador no traduce. Son las
+que `comparar-consultas.js` no alcanzó porque no están en su catálogo de 24.
+Si sale alguna, apague la bandera, anote la consulta y añádala al catálogo
+antes de volver a intentarlo.
+
+#### 5 · Si hay que devolverse
+
+```
+DATOS_PROPIOS=false
+```
+
+y reiniciar. **Pero lea esto antes de hacerlo:** todo lo que se haya escrito
+en MySQL durante la ventana se queda ahí. Si fueron minutos y nadie compró
+nada, no pasa nada. Si pasaron horas con tráfico, hay que traerlo de vuelta
+a Supabase antes de apagar, o se pierde.
+
+Por eso el paso 1 no es opcional y por eso la ventana se elige con cuidado.
+
+---
 ## 5 · Las cuentas
 
 Van a la base de **identidad** (`cuenta_gestek_auth`).
