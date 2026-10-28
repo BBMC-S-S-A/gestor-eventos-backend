@@ -118,9 +118,30 @@ const TABLAS = [
 ];
 
 /* Casi todas las tablas se ordenan y emparejan por `id`. Las que NO lo tienen
-   (comprobado contra `db/esquema/01_tablas.sql`, su `PRIMARY KEY` real) van
-   aquí con su clave natural — sin esto, `ORDER BY id` truena o empareja mal
-   en las seis que quedan fuera del patrón. */
+   van por su clave natural — sin eso, `ORDER BY id` truena o empareja mal.
+
+   ── Esta lista estaba escrita a mano, y se quedó atrás ──────────────────
+
+   Decía «las seis que quedan fuera del patrón». Eran nueve. Las tres que
+   faltaban —`ticket_type_espacios`, `torneo_jurados`,
+   `torneo_ronda_participantes`— llegaron con las migraciones 006 y 009,
+   después de escribirse la lista, y nadie volvió a contarlas.
+
+   El resultado no era un «no se comprobó»: era
+
+       ! ticket_type_espacios   ERROR   Unknown column 'id' in 'order clause'
+       5 tabla(s) no cuadran. NO se corta todavía.
+
+   O sea, el paso que decide si se corta decía que no se podía cortar por
+   tres tablas que estaban perfectas. Peor aún, esas tres **nunca se
+   compararon**: el guardia que dice «todas iguales» hablaba de menos tablas
+   de las que hay, que es justo lo que la comprobación de cobertura de más
+   abajo existe para impedir.
+
+   Ahora la clave se PREGUNTA a la base: `PRIMARY KEY` es lo que de verdad
+   ordena las filas, y una lista escrita a mano no puede quedarse atrás si no
+   existe. El mapa de abajo sólo queda para la base de origen cuando se lee
+   por PostgREST, donde no hay `information_schema` que preguntar. */
 const CLAVE_POR_TABLA = {
   chat_channel_prefs: ['channel_id', 'user_id'],
   organizador_conexiones: ['owner_id', 'tipo'],
@@ -128,8 +149,29 @@ const CLAVE_POR_TABLA = {
   evento_legal: ['evento_id'],
   oauth_clients: ['client_id'],
   oauth_codes: ['code_hash'],
+  ticket_type_espacios: ['ticket_type_id', 'espacio_id'],
+  torneo_jurados: ['torneo_id', 'user_id'],
+  torneo_ronda_participantes: ['ronda_id', 'equipo_id'],
 };
-const claveDe = (tabla) => CLAVE_POR_TABLA[tabla] || ['id'];
+
+/* Lo que diga MySQL, que es quien tiene la verdad. Se llena una sola vez al
+   arrancar; si la base no contesta, se sigue con el mapa de arriba. */
+const CLAVE_DE_LA_BASE = new Map();
+
+async function cargarClavesDeLaBase() {
+  const filas = await clientes.bd('datos').consultar(
+    `SELECT TABLE_NAME t, COLUMN_NAME c
+       FROM information_schema.KEY_COLUMN_USAGE
+      WHERE TABLE_SCHEMA = DATABASE() AND CONSTRAINT_NAME = 'PRIMARY'
+      ORDER BY TABLE_NAME, ORDINAL_POSITION`);
+  for (const f of filas) {
+    if (!CLAVE_DE_LA_BASE.has(f.t)) CLAVE_DE_LA_BASE.set(f.t, []);
+    CLAVE_DE_LA_BASE.get(f.t).push(f.c);
+  }
+}
+
+const claveDe = (tabla) =>
+  CLAVE_DE_LA_BASE.get(tabla) || CLAVE_POR_TABLA[tabla] || ['id'];
 const claveFila = (fila, clave) => clave.map(c => String(fila[c])).join('::');
 
 /* Si el esquema real gana una tabla y esta lista no se entera, mejor decirlo
@@ -338,6 +380,16 @@ async function main() {
   }
 
   if (!pedidas.length) verificarCobertura();
+
+  /* Antes de nada: qué ordena cada tabla, según la base y no según una lista.
+     Si falla, se sigue con el mapa escrito a mano — pero se dice, porque
+     entonces vuelve a poder quedarse atrás sin que nadie se entere. */
+  try {
+    await cargarClavesDeLaBase();
+  } catch (e) {
+    console.warn(`\n⚠ No pude leer las claves primarias de MySQL (${e.message}).`);
+    console.warn('  Se usa la lista escrita a mano, que puede estar incompleta.\n');
+  }
 
   console.log(`\nComparando ${tablas.length} tabla(s)…\n`);
   const resultados = [];

@@ -87,13 +87,34 @@ function valorParaMysql(v) {
  * Se insertan SÓLO las columnas que existen en MySQL. Pero una columna que
  * Supabase tiene y MySQL no es PÉRDIDA DE DATOS, así que no se calla: se
  * cuenta y se avisa al final, con nombre. */
+/* Las columnas generadas (VIRTUAL/STORED) no se pueden escribir: MySQL da
+   ER_NON_INSERTABLE_TABLE si se intenta. Las calcula él.
+ *
+ * ── El filtro que estuvo mal, y por qué no se veía ───────────────────────
+ *
+ * Esto miraba `EXTRA` buscando «GENERATED». Parece lo obvio, y es un desastre:
+ * MySQL 8 pone **`DEFAULT_GENERATED`** en `EXTRA` a toda columna que tenga un
+ * `DEFAULT` con expresión — `created_at DEFAULT CURRENT_TIMESTAMP(6)`,
+ * `branding DEFAULT (CAST('{}' AS JSON))`, `estado DEFAULT ('borrador')`…
+ *
+ * Medido contra el esquema real: **204 columnas en 81 de las 84 tablas**
+ * caían en ese filtro. No son generadas; son columnas normales con valor por
+ * defecto, y quedaban fuera del INSERT.
+ *
+ * El modo de fallo es el peor que tiene este proyecto: la carga **no daba
+ * error**. Las filas entraban todas, los conteos cuadraban, el script decía
+ * «todas las tablas cuadran» — y dentro, cada `page_json` era `{}`, cada
+ * `estado` era 'borrador' y cada `created_at` era la hora de la migración.
+ * 38.421 filas con la mitad del contenido en su valor por defecto.
+ *
+ * `GENERATION_EXPRESSION` es la pregunta de verdad: está vacía salvo en las
+ * generadas (7 en todo el esquema). No hay que interpretar ninguna cadena. */
 async function columnasDe(tabla) {
   const filas = await base.consultar(
-    `SELECT COLUMN_NAME AS c, EXTRA AS extra FROM information_schema.COLUMNS
-      WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?`, [tabla]);
-  /* Las columnas generadas (VIRTUAL/STORED) no se pueden escribir: MySQL da
-     ER_NON_INSERTABLE_TABLE si se intenta. Las calcula él. */
-  return new Set(filas.filter(f => !/GENERATED/i.test(f.extra || '')).map(f => f.c));
+    `SELECT COLUMN_NAME AS c FROM information_schema.COLUMNS
+      WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?
+        AND (GENERATION_EXPRESSION IS NULL OR GENERATION_EXPRESSION = '')`, [tabla]);
+  return new Set(filas.map(f => f.c));
 }
 
 /* ── Leer una tabla de Supabase, por páginas ─────────────────────────────*/
