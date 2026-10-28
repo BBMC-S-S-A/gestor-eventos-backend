@@ -52,6 +52,22 @@ decir nada. Por eso `gestek_datos` tenía 180 y no 182.
 Trae primero las consultas que buscan huérfanos: si devuelven filas, hay que
 mirarlas antes, o el `ALTER` falla con `ERROR 1452`.
 
+### `listo-para-datos.sql`
+
+`scripts/listo-para-datos.js` en SQL puro, para cuando no hay forma cómoda de
+correr Node en el servidor. El cPanel de este proyecto trae **Application
+Manager** y no el viejo *Setup Node.js App*, y esa pantalla no siempre ofrece
+un botón para correr un script de `package.json`.
+
+Comprueba lo mismo salvo dos cosas que no son de la base: que el adaptador
+cargue —lo cubren las pruebas del repositorio— y cómo está la bandera ahora,
+que se ve en el panel.
+
+Devuelve una fila por comprobación con una columna `veredicto`: todas tienen
+que decir `OK`. Verificado contra una réplica cargada (siete OK) y contra una
+en utf8mb3 a la que le faltan una columna, un índice y los datos (cuatro
+`REVISAR`, cada uno con lo que se esperaba).
+
 ### `diagnostico-claves-ajenas.sql`
 
 Lista cuáles de las 182 claves ajenas faltan en una base. Fue lo que encontró
