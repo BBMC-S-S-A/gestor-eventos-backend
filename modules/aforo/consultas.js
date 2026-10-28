@@ -157,6 +157,21 @@ async function serie(eventoId, minutos = 15) {
  * se devuelve también `tramos`: sin ese número, «media de 40 minutos» no dice
  * si se midió sobre 500 personas o sobre 3. Estaba en el original a propósito
  * y se conserva.
+ *
+ * ── Por qué MICROSECOND y no SECOND ──────────────────────────────────────
+ *
+ * `TIMESTAMPDIFF(SECOND, a, b)` devuelve un ENTERO: tira los microsegundos de
+ * cada tramo. La función de Postgres usa `extract(epoch from (b - a))`, que
+ * los conserva. Las columnas son `DATETIME(6)`, así que esa parte existe.
+ *
+ * Medido contra FESTECH: la zona `acc_kic8bme` daba 19.0 minutos de media
+ * aquí y 19.1 en Postgres. Un decimal, y sale de truncar seis tramos. No es
+ * un error de redondeo que se compense: todos los truncamientos van hacia
+ * abajo, así que la media SIEMPRE sale igual o menor — y cuanto más corta es
+ * la estancia, más pesa. Es el número con el que se decide si una zona se
+ * congestiona.
+ *
+ * `/ 1000000` antes de dividir entre 60 para no arrastrar el error al revés.
  */
 async function estancia(eventoId) {
   return bd('datos').consultar(`
@@ -170,8 +185,8 @@ async function estancia(eventoId) {
          AND (mv.zona_id IS NOT NULL OR mv.zona IS NOT NULL)
     )
     SELECT clave,
-           ROUND(AVG(TIMESTAMPDIFF(SECOND, created_at, sig_at)) / 60, 1) AS minutos_prom,
-           ROUND(MAX(TIMESTAMPDIFF(SECOND, created_at, sig_at)) / 60, 1) AS minutos_max,
+           ROUND(AVG(TIMESTAMPDIFF(MICROSECOND, created_at, sig_at) / 1000000) / 60, 1) AS minutos_prom,
+           ROUND(MAX(TIMESTAMPDIFF(MICROSECOND, created_at, sig_at) / 1000000) / 60, 1) AS minutos_max,
            COUNT(*) AS tramos
       FROM pares
      WHERE tipo = 'entrada' AND sig_tipo = 'salida'

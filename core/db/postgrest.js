@@ -1491,9 +1491,24 @@ const FUNCIONES = {
   sumar_aforo_vendido : (a) => require('../../modules/contadores/index.js').sumarAforoVendido(a.p_evento, a.p_delta),
   sumar_vendidos_tipo : (a) => require('../../modules/contadores/index.js').sumarVendidosTipo(a.p_tipo, a.p_delta),
 
-  /* Los recordatorios — `modules/recordatorios/index.js`. */
-  find_pending_reminders     : (a) => require('../../modules/recordatorios/index.js').pendientesDeCorreo(a.p_limit),
-  generar_recordatorios_inapp: ()  => require('../../modules/recordatorios/index.js').generarAvisosEnApp(),
+  /* Los recordatorios — `modules/recordatorios/index.js`.
+   *
+   * Estas dos reciben `bd` POR PARÁMETRO, al revés que las demás de esta
+   * tabla, que lo importan ellas. Y estaban cableadas como si no:
+   *
+   *     pendientesDeCorreo(a.p_limit)     // bd = 50
+   *
+   * `bd('datos')` sobre el número 50 es `bd is not a function`, y el límite
+   * nunca llegaba a su sitio — es el segundo argumento, dentro de opciones.
+   *
+   * No daba la cara en ninguna prueba: las de `postgrest.funciones` sólo
+   * comprueban que los catorce nombres se conozcan, no que lo que hay detrás
+   * se pueda llamar. Lo encontró `comparar-consultas.js` corriendo contra la
+   * base cargada, que es para lo que existe. */
+  find_pending_reminders     : (a) => require('../../modules/recordatorios/index.js')
+    .pendientesDeCorreo(bd, a?.p_limit != null ? { limite: a.p_limit } : {}),
+  generar_recordatorios_inapp: ()  => require('../../modules/recordatorios/index.js')
+    .generarAvisosEnApp(bd),
 
   /* Las reservas de espacio — `modules/espacios/index.js`. */
   retener_espacio   : (a) => require('../../modules/espacios/index.js').retener(a.p_espacio, a.p_evento, a.p_sesion, a.p_minutos),

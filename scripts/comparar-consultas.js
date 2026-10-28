@@ -142,10 +142,21 @@ function catalogo({ evento }) {
     { ordenado: true });
 
   /* Tramo 5 · los embebidos */
+  /* `lib/acceso.js:63` pide UNA fila: evento + usuario + activo, y
+     `maybeSingle()`. Aquí se piden cuarenta para que la comparación tenga
+     material, pero el orden tiene que ser total igual que allí es única.
+
+     Ordenaba sólo por `user_id`, y eso empata: una persona es miembro de
+     varios eventos, y cuatro de los cuarenta primeros se repetían. Con el
+     empate, Postgres y MySQL eligen cuál va antes por su cuenta, así que la
+     comparación marcaba «el contenido difiere» enseñando dos roles
+     distintos —del mismo usuario, en eventos distintos— como si el adaptador
+     hubiera traído mal el embebido. Era la consulta de la prueba la que no
+     decidía, no el adaptador el que se equivocaba. */
   add(5, 'EL GUARDIA — event_members con su rol (lib/acceso.js)',
     c => c.from('event_members')
-      .select('user_id, custom_permissions, rol_detail:event_roles!rol_id(permissions)')
-      .order('user_id').limit(40),
+      .select('evento_id, user_id, custom_permissions, rol_detail:event_roles!rol_id(permissions)')
+      .order('user_id').order('evento_id').limit(40),
     { ordenado: true });
 
   add(5, 'embebido sin decir la clave',
@@ -163,9 +174,20 @@ function catalogo({ evento }) {
     c => c.from('tickets').select('id').or('estado.eq.pagado,estado.eq.emitido').order('id').limit(40),
     { ordenado: true });
 
+  /* La forma de `routes/clientes.js:292`:
+     `created_at.lt.X,and(created_at.eq.X,id.lt.Y)` — el desempate por id
+     cuando dos filas comparten fecha.
+
+     Decía `id.gt.0`, y `tickets.id` es un UUID. PostgREST contesta «invalid
+     input syntax for type uuid: "0"» y el adaptador devolvía cuarenta filas
+     tan tranquilo, así que la comparación cantaba «uno de los dos dio error».
+     Lo que estaba mal era la consulta de la prueba: ningún sitio del código
+     compara un uuid con cero. Ahora va con un uuid, como en producción. */
   add(6, 'or anidado con and() — el cursor de clientes',
     c => c.from('tickets').select('id, created_at')
-      .or('created_at.lt.2100-01-01,and(created_at.is.null,id.gt.0)').order('id').limit(40),
+      .or('created_at.lt.2100-01-01,and(created_at.eq.2100-01-01,'
+        + 'id.lt.ffffffff-ffff-ffff-ffff-ffffffffffff)')
+      .order('id').limit(40),
     { ordenado: true });
 
   add(6, 'or combinado con eq — EL PARÉNTESIS',
