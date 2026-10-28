@@ -578,9 +578,9 @@ que el §4 tenga sentido. Al 27 de octubre:
 | Sumas atómicas de lo vendido en `modules/contadores/` | ✅ hecho |
 | Semillas de evento (roles, canales) en `modules/eventos/semillas.js` | ✅ hecho |
 | Lo vendido: las 13 llamadas pasan por `lib/contadores.js` y obedecen a `DATOS_PROPIOS` | ✅ hecho |
-| **Cablear el RESTO de las rutas a MySQL** — 1.152 llamadas en 95 archivos, medido. El frente y los dos caminos, en `EL-RESTO-DE-LAS-RUTAS.md` | ⬜ **falta** |
+| **Cablear el RESTO de las rutas a MySQL** — 1.152 llamadas en 95 archivos | ✅ hecho, y no como decía esta línea — ver abajo |
 | Las 8 columnas `ARRAY` → `JSON` | ✅ hecho — resultó ser una sola consulta; ver NOTAS-ESQUEMA |
-| Los 5 uploaders del frontend, que hoy suben directo a Supabase | ⬜ falta (va con el §7) |
+| Los 5 uploaders del frontend, que hoy suben directo a Supabase | ✅ hecho — seis componentes, y ninguno toca `storage` ya |
 
 La de los `ARRAY` se creía la más brava —`event_members.custom_permissions`
 la lee `core/permisos/cargarEvento()`, el guardia de las 378 rutas— y medida
@@ -589,8 +589,35 @@ JSON como array de JS), escribirlas pide `JSON.stringify` y falla ruidoso si
 se olvida, y consultarlas con operadores de Postgres había **una sola vez** en
 todo el código. El detalle, en `migraciones/NOTAS-ESQUEMA.md`.
 
-Así que lo único grande que queda de verdad es **el resto de las rutas**.
-Medido el 27-oct: **1.152 llamadas en 95 archivos sobre 86 tablas**, no los 43
-archivos que decía esta tabla —ése era el número de archivos que *mencionan*
-supabase, no los que consultan—. El frente entero, los dos caminos posibles y
-la recomendación están en [`EL-RESTO-DE-LAS-RUTAS.md`](EL-RESTO-DE-LAS-RUTAS.md).
+### Y lo de «el resto de las rutas» ya no es lo que queda
+
+Esta tabla decía que lo único grande pendiente eran **1.152 llamadas en 95
+archivos**, y mandaba a `EL-RESTO-DE-LAS-RUTAS.md`. Esa frase se escribió
+cuando el camino A —reescribir las 1.152 a mano— seguía sobre la mesa.
+
+Se tomó el **camino B**, que existe precisamente para no tener que tocarlas:
+
+```
+routes/  → 43 archivos, los 43 hacen require('../lib/supabase.js')
+lib/     → 50 archivos, los 50 hacen require('./supabase.js')
+```
+
+`lib/supabase.js` es la costura: según `DATOS_PROPIOS` devuelve el cliente de
+Supabase o `core/db/postgrest.js`. Ninguna ruta habla con Supabase
+directamente, así que **esas llamadas no hay que reescribirlas** — cambian de
+motor con la bandera.
+
+Las únicas que NO pasan por la costura son `middleware/auth.js` —que pide
+`supabase.auth.getUser()` mientras `AUTH_PROPIA` esté apagada, y por eso usa
+`lib/supabaseCliente.js` a propósito— y los tres scripts de comparación y
+migración, que tienen que hablar con PostgREST de verdad o compararían el
+adaptador consigo mismo.
+
+Lo que sustituye a «reescribir las rutas» no es trabajo de código sino de
+comprobación, y es el §4.4: que el adaptador conteste lo mismo. Medido el
+28-oct contra la base ya cargada: **24/24**.
+
+Medido también ese día, por si hace falta rehacer la cuenta: 1.230 menciones
+de `supabase` en 95 archivos de `routes/`, `lib/`, `modules/`, `middleware/` y
+`core/`. El número se mueve con cada cambio; lo que no se mueve es que todas
+entran por el mismo archivo.
