@@ -61,6 +61,30 @@ app.get('/health', publica('Latido del servidor: lo consultan el panel de cPanel
     timestamp: new Date().toISOString(),
     commit: commitDesplegado(),
     commit_corto: commitCorto(),
+
+    /* ── Para qué sirven estas dos ────────────────────────────────────────
+     *
+     * Las banderas se encienden poniendo una variable en el panel del cPanel
+     * y reiniciando. Passenger las lee al reiniciar, no al guardarlas, y ahí
+     * está el problema: un reinicio que no ocurrió se ve exactamente igual
+     * que uno que sí, porque la aplicación responde en los dos casos.
+     *
+     * La única señal que había era una línea en el log del arranque, y en
+     * Application Manager los logs no siempre están a mano. Así que se
+     * preguntaba a ciegas.
+     *
+     * `uptime_s` dice hace cuántos segundos arrancó este proceso: si es un
+     * número chiquito, el reinicio ocurrió. `banderas` dice qué está leyendo
+     * de verdad, que es lo que se quería saber.
+     *
+     * Son dos booleanos y un número, no dicen nada de nadie, y esta ruta ya
+     * era pública. */
+    uptime_s: Math.round(process.uptime()),
+    banderas: {
+      AUTH_PROPIA     : configPropia.AUTH_PROPIA,
+      ARCHIVOS_PROPIOS: configPropia.ARCHIVOS_PROPIOS,
+      DATOS_PROPIOS   : configPropia.DATOS_PROPIOS,
+    },
   };
 
   /* Los correos que no salieron, sólo con la identidad propia encendida.
