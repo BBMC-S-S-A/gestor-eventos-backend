@@ -54,7 +54,7 @@ app.get('/', publica('Portada de la API: dice qué es esto y qué endpoints hay.
    lo miran, y leerlo dos veces invita a que uno de los dos se quede viejo. */
 const configPropia = require('./core/config');
 
-app.get('/health', publica('Latido del servidor: lo consultan el panel de cPanel y cualquier vigilante externo. Trae el commit desplegado para poder comparar Render contra cPanel sin entrar a mirar archivos.'), (_req, res) => {
+app.get('/health', publica('Latido del servidor: lo consultan el panel de cPanel y cualquier vigilante externo. Trae el commit desplegado para poder comparar Render contra cPanel sin entrar a mirar archivos.'), async (_req, res) => {
   const { commitDesplegado, commitCorto } = require('./lib/version.js');
   const cuerpo = {
     status: 'ok',
@@ -86,6 +86,34 @@ app.get('/health', publica('Latido del servidor: lo consultan el panel de cPanel
       DATOS_PROPIOS   : configPropia.DATOS_PROPIOS,
     },
   };
+
+  /* ── ¿MySQL contesta? ───────────────────────────────────────────────────
+   *
+   * Encender `DATOS_PROPIOS` manda TODAS las consultas a MySQL de golpe. Si
+   * una de las cinco variables quedó con un error de dedo, eso no se nota al
+   * guardarla ni al reiniciar: se nota en la primera petición de un usuario,
+   * y para entonces el sitio está caído.
+   *
+   * Esto deja comprobarlo ANTES, con la bandera todavía apagada: si
+   * `responde` es true, las credenciales sirven y el salto es seguro.
+   *
+   * Van sólo dos booleanos y unos milisegundos — ni el host, ni el usuario,
+   * ni el nombre de la base. Esta ruta es pública.
+   *
+   * No cambia el `status` ni tumba la respuesta: mientras `DATOS_PROPIOS`
+   * esté apagada, que MySQL no conteste no es un fallo de nada. */
+  const t0 = Date.now();
+  try {
+    const bdDatos = require('./core/db/mysql.js').bd('datos');
+    if (!bdDatos.configurada()) {
+      cuerpo.mysql = { configurada: false, responde: false };
+    } else {
+      await bdDatos.consultar('SELECT 1');
+      cuerpo.mysql = { configurada: true, responde: true, ms: Date.now() - t0 };
+    }
+  } catch (e) {
+    cuerpo.mysql = { configurada: true, responde: false, error: e.code || 'ERROR' };
+  }
 
   /* Los correos que no salieron, sólo con la identidad propia encendida.
    *

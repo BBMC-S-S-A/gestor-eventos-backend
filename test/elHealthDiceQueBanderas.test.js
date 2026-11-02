@@ -63,6 +63,29 @@ test('las banderas salen del config, no de process.env a mano', () => {
     'las banderas tienen que venir de core/config, que es quien las interpreta');
 });
 
+test('/health dice si MySQL contesta, antes de encender nada', () => {
+  /* Encender `DATOS_PROPIOS` manda todas las consultas a MySQL de golpe. Un
+     error de dedo en una de las cinco variables no se nota al guardarla ni al
+     reiniciar: se nota en la primera petición de un usuario, y para entonces
+     el sitio está caído. Esto deja comprobarlo con la bandera apagada. */
+  const codigo = FUENTE.replace(/\/\*[\s\S]*?\*\//g, '');
+  assert.match(codigo, /cuerpo\.mysql\s*=/, '/health dejó de informar de MySQL');
+  assert.match(codigo, /configurada\s*:/);
+  assert.match(codigo, /responde\s*:/);
+});
+
+test('que MySQL no conteste no tumba /health', () => {
+  /* Mientras `DATOS_PROPIOS` esté apagada, que MySQL no conteste no es un
+     fallo de nada. Si esto cambiara el `status` o lanzara, los vigilantes
+     externos darían alarma por una base que todavía no se usa — y una alarma
+     que suena sin motivo deja de leerse. */
+  const inicio = FUENTE.indexOf("cuerpo.mysql");
+  const bloque = FUENTE.slice(FUENTE.lastIndexOf('try {', inicio), FUENTE.indexOf('res.json(cuerpo)', inicio));
+  assert.match(bloque, /catch/, 'el sondeo de MySQL no está dentro de un try/catch');
+  assert.ok(!/status/.test(bloque.replace(/\/\*[\s\S]*?\*\//g, '')),
+    'el sondeo de MySQL toca el status, y no debe');
+});
+
 test('no se cuela nada secreto en la respuesta', () => {
   /* `/health` es público. Añadir aquí un dato de configuración es fácil y se
      publica sin que nadie lo revise. */
