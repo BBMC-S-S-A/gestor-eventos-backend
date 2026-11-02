@@ -78,8 +78,39 @@ SELECT 'hay datos cargados',
        'si alguna esta vacia, el cargue no se hizo o quedo a medias'
 
 UNION ALL
-SELECT 'el servidor lee en UTC',
-       CONCAT(@@session.time_zone, ' (', TIMESTAMPDIFF(SECOND, UTC_TIMESTAMP(), NOW())/3600, ' h)'),
-       '0 h de diferencia',
-       IF(TIMESTAMPDIFF(SECOND, UTC_TIMESTAMP(), NOW()) = 0, 'OK', 'REVISAR'),
-       'las fechas se cargaron en UTC; en otra zona saldrian corridas';
+/* ── La zona horaria, bien medida ───────────────────────────────────────
+ *
+ * La versión anterior de esta comprobación preguntaba por `@@session.time_zone`
+ * y marcaba REVISAR en cuanto el servidor no estuviera en UTC. Medido en el
+ * cPanel de este proyecto: SYSTEM (-5 h), la hora de Bogotá.
+ *
+ * Era una falsa alarma, y de las peores: la que hace desconfiar de un cargue
+ * que está bien. Lo que medía era la sesión de **phpMyAdmin**, que no es la
+ * que usa la aplicación. `core/db/mysql.js` fija la suya en CADA conexión
+ * nueva del pool:
+ *
+ *     pool.on('connection', cx => cx.query("SET time_zone = '+00:00'"))
+ *
+ * más `timezone: 'Z'` en el driver. O sea que la zona del servidor da igual.
+ *
+ * Lo que sí hay que comprobar —y lo que la versión anterior no comprobaba—
+ * es si los DATOS quedaron bien. Eso no se pregunta: se mira una fecha
+ * conocida. FESTECH empieza a las 14:00 UTC, y así está en Supabase. Si aquí
+ * sale otra cosa, el cargue entró corrido. */
+SELECT 'las fechas quedaron en UTC',
+       IFNULL((SELECT CAST(fecha_inicio AS CHAR) FROM `gestek_datos`.`eventos`
+                WHERE id = '7826f5fb-80a0-453d-b6b9-0a2834e11656'), '(no esta FESTECH)'),
+       '2026-09-17 14:00:00.000000',
+       IF((SELECT fecha_inicio FROM `gestek_datos`.`eventos`
+            WHERE id = '7826f5fb-80a0-453d-b6b9-0a2834e11656') = '2026-09-17 14:00:00.000000',
+          'OK', 'REVISAR'),
+       'si sale 09:00, el cargue entro corrido 5 horas'
+
+UNION ALL
+/* Informativo. No decide nada: la aplicacion fija la suya. */
+SELECT 'zona del servidor (informativo)',
+       CONCAT(@@session.time_zone, ' = ',
+              TIMESTAMPDIFF(SECOND, UTC_TIMESTAMP(), NOW())/3600, ' h de UTC'),
+       'da igual cual sea',
+       'OK',
+       'la app fija SET time_zone=+00:00 en cada conexion (core/db/mysql.js)';

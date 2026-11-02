@@ -154,6 +154,27 @@ async function main() {
     : mal(`la conexión va ${Number(d) / 3600} h fuera de UTC (time_zone = ${z}) — ` +
           'las fechas se guardaron en UTC y saldrían corridas');
 
+  /* ── 6b · Y que las fechas hayan ENTRADO bien ─────────────────────────
+   *
+   * Lo de arriba comprueba que esta conexión lee en UTC. Esto es otra cosa:
+   * si las fechas se GUARDARON corridas, leerlas bien no las arregla.
+   *
+   * No se pregunta, se mira una conocida. FESTECH empieza a las 14:00 UTC y
+   * así está en Supabase. Si aquí sale 09:00, el cargue entró con la zona
+   * del servidor —la de Bogotá— en vez de con UTC. */
+  const FESTECH = '7826f5fb-80a0-453d-b6b9-0a2834e11656';
+  const INICIO  = '2026-09-17 14:00:00.000000';
+  try {
+    const f = await datos.consultar(
+      'SELECT CAST(fecha_inicio AS CHAR) c FROM `eventos` WHERE id = ?', [FESTECH]);
+    if (!f.length) aviso('no está FESTECH para comprobar las fechas; se mira otra a mano');
+    else if (f[0].c === INICIO) ok('las fechas entraron en UTC (FESTECH a las 14:00)');
+    else mal(`FESTECH quedó en ${f[0].c} y debería estar en ${INICIO} — ` +
+             'el cargue entró corrido; leerlas bien no lo arregla');
+  } catch (e) {
+    aviso(`no pude comprobar las fechas: ${e.message}`);
+  }
+
   /* ── 7 · Que el adaptador cargue ──────────────────────────────────────*/
   try {
     const pg = require('../core/db/postgrest.js');
