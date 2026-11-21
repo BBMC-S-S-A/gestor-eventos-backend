@@ -97,6 +97,18 @@ test('los dos comparadores piden el cliente DE VERDAD', () => {
   }
 });
 
+test('modules/perfiles pide el cliente DE VERDAD, no la costura', () => {
+  /* Lee de Supabase el perfil de quien se registró después del corte. Por la
+     costura leería de MySQL —donde va a escribir—, así que no encontraría
+     nunca el perfil que busca y no copiaría a nadie: el hueco que vino a
+     tapar seguiría abierto, y sin un solo error. */
+  const src = fuente('modules/perfiles/index.js');
+  assert.match(src, /require\('\.\.\/\.\.\/lib\/supabaseCliente\.js'\)/,
+    'modules/perfiles ya no pide el cliente de verdad');
+  assert.doesNotMatch(src, /require\('\.\.\/\.\.\/lib\/supabase\.js'\)/,
+    'modules/perfiles pasa por la costura: buscaría el perfil donde va a escribirlo');
+});
+
 test('nadie más pide supabaseCliente a sus espaldas', () => {
   /* El cliente de verdad es para el login y los comparadores. Si una ruta lo
      pidiera, se saltaría la costura y seguiría hablando con Supabase el día
@@ -110,7 +122,14 @@ test('nadie más pide supabaseCliente a sus espaldas', () => {
     }
     return out;
   }
-  const PERMITIDOS = ['middleware/auth.js', 'lib/supabase.js'];
+  /* La lista es corta a propósito, y cada entrada dice por qué.
+
+     `modules/perfiles/index.js` entró el 21-nov. Es el que copia a MySQL el
+     perfil de quien se registró después del corte, y para eso tiene que leer
+     de Supabase mientras todo lo demás lee de MySQL: por la costura leería
+     del mismo sitio donde va a escribir, y no encontraría nunca el perfil que
+     busca. Mismo motivo que los comparadores. */
+  const PERMITIDOS = ['middleware/auth.js', 'lib/supabase.js', 'modules/perfiles/index.js'];
   const culpables = ['lib', 'routes', 'modules', 'core', 'middleware']
     .flatMap(archivos)
     .filter(f => /require\([^)]*supabaseCliente/.test(fuente(f)))

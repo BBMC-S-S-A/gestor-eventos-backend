@@ -121,6 +121,33 @@ async function porSupabase(token) {
   return data.user;
 }
 
+/* ── El perfil de quien entra por Supabase ──────────────────────────────
+ *
+ * Mientras la identidad viva en Supabase y los datos en MySQL, quien se
+ * registre nace sólo en Supabase: su fila de `profiles` la crea un disparador
+ * de Postgres (`on_auth_user_created`), no este backend. MySQL no se entera,
+ * y su primer evento muere contra la clave ajena de `owner_id`. Pasó con
+ * cuatro personas el 20 de noviembre; el detalle está en
+ * `modules/perfiles/sincronizar.js`.
+ *
+ * Va aquí porque es el único sitio por donde pasa todo el mundo, y SÓLO en el
+ * camino de Supabase: quien entra con token nuestro ya tiene su cuenta en
+ * MySQL por definición.
+ *
+ * No se espera (`await`) a propósito. Copiar el perfil no es parte de
+ * responder esta petición: si tardara, retrasaría a todo el mundo para
+ * arreglar algo de una sola persona. El módulo se traga sus propios fallos,
+ * así que no hay promesa que pueda quedar rechazada sin recoger. */
+function asegurarPerfil(user) {
+  if (!user?.id) return;
+  try {
+    require('../modules/perfiles').asegurar(user.id);
+  } catch (e) {
+    /* Ni siquiera cargar el módulo puede tumbar una petición. */
+    console.warn(`[perfiles] no pude arrancar la copia de ${user.id}: ${e.message}`);
+  }
+}
+
 async function verifySupabaseJWT(req, res, next) {
   const token = tokenDe(req);
   if (!token) return res.status(401).json({ error: 'Token requerido.' });
@@ -131,6 +158,7 @@ async function verifySupabaseJWT(req, res, next) {
   const suyo = await porSupabase(token);
   if (!suyo) return res.status(401).json({ error: 'Token inválido o expirado.' });
 
+  asegurarPerfil(suyo);
   req.user = suyo;
   next();
 }
@@ -144,7 +172,8 @@ async function verifySupabaseJWTOptional(req, _res, next) {
   if (nuestro) { req.user = nuestro; return next(); }
 
   req.user = await porSupabase(token);
+  asegurarPerfil(req.user);
   next();
 }
 
-module.exports = { verifySupabaseJWT, verifySupabaseJWTOptional, _paraPruebas: { recordados, porSupabase } };
+module.exports = { verifySupabaseJWT, verifySupabaseJWTOptional, _paraPruebas: { recordados, porSupabase, asegurarPerfil } };
